@@ -320,8 +320,8 @@ void sgmCPU(CMatrix<float> &result,
    *-----------------------------------------------------------------------*/
 
   /* HORIZONTAL (scanline-wise) message Passing */
-  std::vector<CMatrix<float> > MpqsF_(leftImg.ySize());
-  std::vector<CMatrix<float> > MpqsB_(leftImg.ySize());
+  std::vector<CMatrix<float> > MpqsHFCube(leftImg.ySize());  // Horizontal Forward 
+  std::vector<CMatrix<float> > MpqsHBCube(leftImg.ySize());  // Horizontal Backward
 
   std::cout << "Computing HORIZONTAL disparities... \r" << std::flush;
   for (int y = 0; y < leftImg.ySize(); ++y)
@@ -329,54 +329,54 @@ void sgmCPU(CMatrix<float> &result,
     /*---------------------------------------------------------------------
      *  Forward pass
      *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsF(leftImg.xSize(), MAX_DISPARITY + 1);
+    CMatrix<float> MpqsHF(leftImg.xSize(), MAX_DISPARITY + 1);
     for (int j = 0; j <= MAX_DISPARITY; ++j)
     { 
-      MpqsF(0, j) = 0.0f;
+      MpqsHF(0, j) = 0.0f;
     }
     for (int q = 1; q < leftImg.xSize(); ++q)
     {
       for (int j = 0; j <= MAX_DISPARITY; ++j)
       {
-        MpqsF(q, j) = unarycosts(q - 1, y, 0) + MpqsF(q - 1, 0) +
+        MpqsHF(q, j) = unarycosts(q - 1, y, 0) + MpqsHF(q - 1, 0) +
               LAMBDA * thetapq(0, j);
         for (int i = 1; i <= MAX_DISPARITY; ++i)
         {
-          float cost = unarycosts(q - 1, y, i) + MpqsF(q - 1, i) +
+          float cost = unarycosts(q - 1, y, i) + MpqsHF(q - 1, i) +
               LAMBDA * thetapq(i, j);
-          if (cost < MpqsF(q, j)) {
-            MpqsF(q, j) = cost;
+          if (cost < MpqsHF(q, j)) {
+            MpqsHF(q, j) = cost;
           }
         }
       }
     }
-    MpqsF_[y] = MpqsF;
+    MpqsHFCube[y] = MpqsHF;
 
     /*---------------------------------------------------------------------
      *  Backward pass
      *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsB(leftImg.xSize(), MAX_DISPARITY + 1);
+    CMatrix<float> MpqsHB(leftImg.xSize(), MAX_DISPARITY + 1);
     for (int j = 0; j <= MAX_DISPARITY; ++j)
     {
-      MpqsB(leftImg.xSize() - 1, j) = 0.0f;
+      MpqsHB(leftImg.xSize() - 1, j) = 0.0f;
     }
     for (int q = leftImg.xSize() - 2; q >= 0; --q)
     {
       for (int j = 0; j <= MAX_DISPARITY; ++j)
       {
-        MpqsB(q, j) = unarycosts(q + 1, y, 0) + MpqsB(q + 1, 0) +
+        MpqsHB(q, j) = unarycosts(q + 1, y, 0) + MpqsHB(q + 1, 0) +
               LAMBDA * thetapq(0, j);
         for (int i = 1; i <= MAX_DISPARITY; ++i)
         {
-          float cost = unarycosts(q + 1, y, i) + MpqsB(q + 1, i) +
+          float cost = unarycosts(q + 1, y, i) + MpqsHB(q + 1, i) +
               LAMBDA * thetapq(i, j);
-          if (cost < MpqsB(q, j)) {
-            MpqsB(q, j) = cost;
+          if (cost < MpqsHB(q, j)) {
+            MpqsHB(q, j) = cost;
           }
         }
       }
     }
-    MpqsB_[y] = MpqsB;
+    MpqsHBCube[y] = MpqsHB;
     std::cout << "Computing HORIZONTAL disparities... "
               << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
               << std::flush;
@@ -385,8 +385,8 @@ void sgmCPU(CMatrix<float> &result,
 
     
   /* VERTICAL (scanline-wise) message Passing */
-  std::vector<CMatrix<float> > MpqsVF_(leftImg.xSize());
-  std::vector<CMatrix<float> > MpqsVB_(leftImg.xSize());
+  std::vector<CMatrix<float> > MpqsVFCube(leftImg.xSize());  // Vertical Forward
+  std::vector<CMatrix<float> > MpqsVBCube(leftImg.xSize());  // Vertical Backward
 
   std::cout << "Computing VERTICAL disparities... \r" << std::flush;
   for (int x = 0; x < leftImg.xSize(); ++x)
@@ -415,7 +415,7 @@ void sgmCPU(CMatrix<float> &result,
         }
       }
     }
-    MpqsVF_[x] = MpqsVF;
+    MpqsVFCube[x] = MpqsVF;
 
     /*---------------------------------------------------------------------
      *  Backward pass (Bottom to Top)
@@ -441,12 +441,94 @@ void sgmCPU(CMatrix<float> &result,
         }
       }
     }
-    MpqsVB_[x] = MpqsVB;
+    MpqsVBCube[x] = MpqsVB;
     std::cout << "Computing VERTICAL disparities... "
               << static_cast<int>((100.0f * x) / leftImg.xSize()) << "% \r"
               << std::flush;
   }
   std::cout << "Computing VERTICAL disparities...100%" << std::endl;
+
+  
+  /* DIAGONAL message Passing */
+  std::vector<CMatrix<float> > MpqsDBRCube(leftImg.ySize()); // Diagonal to Bottom Right
+  std::vector<CMatrix<float> > MpqsDBLCube(leftImg.ySize()); // Diagonal to Bottom Left
+
+  // Initialize top row of disparities matrices
+  std::cout << "Computing DIAGONAL disparities... \r" << std::flush;
+  CMatrix<float> MpqsDBR(leftImg.xSize(), MAX_DISPARITY + 1);
+  CMatrix<float> MpqsDBL(leftImg.xSize(), MAX_DISPARITY + 1);
+  for (int x = 0; x < leftImg.xSize(); ++x)
+  {
+    for (int j = 0; j <= MAX_DISPARITY; ++j) 
+    {
+      MpqsDBR(0, j) = 0.0f;
+      MpqsDBL(0, j) = 0.0f;
+    }
+  }
+  MpqsDBRCube[0] = MpqsDBR;
+  MpqsDBLCube[0] = MpqsDBL;
+
+  for (int y = 1; y < leftImg.ySize(); ++y)
+  {
+    /*---------------------------------------------------------------------
+     *  To Bottom Right pass
+     *---------------------------------------------------------------------*/
+    CMatrix<float> MpqsDBR(leftImg.xSize(), MAX_DISPARITY + 1);
+    // Initialize dispaties matrix
+    for (int j = 0; j <= MAX_DISPARITY; ++j)
+    { 
+      MpqsDBR(0, j) = 0.0f;
+    }
+
+
+    for (int q = 1; q < leftImg.xSize(); ++q)
+    {
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      {
+        MpqsDBR(q, j) = unarycosts(q - 1, y - 1, 0) + MpqsDBRCube[y-1](q - 1, 0) +
+              LAMBDA * thetapq(0, j);
+        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        {
+          float cost = unarycosts(q - 1, y - 1, i) + MpqsDBRCube[y-1](q - 1, i) +
+              LAMBDA * thetapq(i, j);
+          if (cost < MpqsDBR(q, j)) {
+            MpqsDBR(q, j) = cost;
+          }
+        }
+      }
+    }
+    MpqsDBRCube[y] = MpqsDBR;
+
+    /*---------------------------------------------------------------------
+     *  To Bottom Left pass
+     *---------------------------------------------------------------------*/
+    CMatrix<float> MpqsDBL(leftImg.xSize(), MAX_DISPARITY + 1);
+    for (int j = 0; j <= MAX_DISPARITY; ++j)
+    {
+      MpqsDBL(leftImg.xSize() - 1, j) = 0.0f;
+    }
+    for (int q = leftImg.xSize() - 2; q >= 0; --q)
+    {
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      {
+        MpqsDBL(q, j) = unarycosts(q + 1, y - 1, 0) + MpqsDBLCube[y-1](q + 1, 0) +
+              LAMBDA * thetapq(0, j);
+        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        {
+          float cost = unarycosts(q + 1, y, i) + MpqsDBLCube[y-1](q + 1, i) +
+              LAMBDA * thetapq(i, j);
+          if (cost < MpqsDBL(q, j)) {
+            MpqsDBL(q, j) = cost;
+          }
+        }
+      }
+    }
+    MpqsDBLCube[y] = MpqsDBL;
+    std::cout << "Computing DIAGONAL disparities... "
+              << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
+              << std::flush;
+  }
+  std::cout << "Computing DIAGONAL disparities...100%" << std::endl;
 
 
   /*---------------------------------------------------------------------
@@ -459,17 +541,17 @@ void sgmCPU(CMatrix<float> &result,
     {
       int minIndex = 0;
       float minCost = unarycosts(x, y, 0) 
-                      + MpqsF_[y](x, 0)
-                      + MpqsB_[y](x, 0)
-                      + MpqsVF_[x](y, 0)
-                      + MpqsVB_[x](y, 0);
+                      + MpqsHFCube[y](x, 0)
+                      + MpqsHBCube[y](x, 0)
+                      + MpqsVFCube[x](y, 0)
+                      + MpqsVBCube[x](y, 0);
       for (int i = 1; i <= MAX_DISPARITY; ++i)
       {
         float cost = unarycosts(x, y, i) 
-                     + MpqsF_[y](x, i)
-                     + MpqsB_[y](x, i)
-                     + MpqsVF_[x](y, i)
-                     + MpqsVB_[x](y, i);
+                     + MpqsHFCube[y](x, i)
+                     + MpqsHBCube[y](x, i)
+                     + MpqsVFCube[x](y, i)
+                     + MpqsVBCube[x](y, i);
         if (cost < minCost)
         {
           minCost = cost;
