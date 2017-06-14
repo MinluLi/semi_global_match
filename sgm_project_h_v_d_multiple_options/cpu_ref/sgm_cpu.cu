@@ -5,14 +5,7 @@
 #include <sstream>
 #include <iostream>
 #include <iomanip>
-#include <map>
 
-
-// Output file
-char *outputFile;
-
-// unaryCosts map
-std::map<int, std::string> unaryCosts;
 
 // Convert integer to std::string
 template <typename T>
@@ -328,18 +321,9 @@ inline float thetapq(int a, int b)
 /*======================================================================*/
 void sgmCPU(CMatrix<float> &result,
             CMatrix<Color> const &leftImg, CMatrix<Color> const &rightImg,
-            int unaryCost, int N)
+            int unaryCost, int N,
+            bool horizontal, bool vertical, bool diagonal)
 {
-  std::cout << "*****************************************************";
-  std::cout << std::endl;
-  if (unaryCost == 0) {
-    std::cout << "Unary cost: " << unaryCosts[unaryCost] << std::endl;
-  } else {
-    std::cout << "Unary cost: " << unaryCosts[unaryCost];
-    std::cout << ", " << N << "x" << N << " patches" << std::endl;
-  }
-
-
   /*-----------------------------------------------------------------------
    *  Unary cost computation 
    *-----------------------------------------------------------------------*/
@@ -668,81 +652,46 @@ void sgmCPU(CMatrix<float> &result,
   /*---------------------------------------------------------------------
    *  Decision
    *---------------------------------------------------------------------*/
-  int decisionOptions[3][3] = {{1, 0, 0},  // horizontal
-                               {1, 1, 0},  // horizontal + vertical
-                               {1, 1, 1},  // horizontal + vertical + diag
-                               };
   std::cout << "Computing DECISIONS... \r" << std::flush;
-
-  for (int k = 0; k < 3; ++k)
+  for (int y = 0; y < leftImg.ySize(); ++y) 
   {
-    for (int y = 0; y < leftImg.ySize(); ++y) 
+    for (int x = 0; x < leftImg.xSize(); ++x)
     {
-      for (int x = 0; x < leftImg.xSize(); ++x)
+      int minIndex = 0;
+      float minCost = unarycosts(x, y, 0) 
+                      + horizontal*(MpqsHFCube[y](x, 0)
+                                    + MpqsHBCube[y](x, 0))
+                      + vertical*(MpqsVFCube[x](y, 0)
+                                  + MpqsVBCube[x](y, 0))
+                      + diagonal*(MpqsDBRCube[y](x, 0)
+                                 + MpqsDBLCube[y](x, 0)
+                                 + MpqsDTLCube[y](x, 0)
+                                 + MpqsDTRCube[y](x, 0));
+      for (int i = 1; i <= MAX_DISPARITY; ++i)
       {
-        int minIndex = 0;
-        float minCost = unarycosts(x, y, 0) 
-                        + decisionOptions[k][0]*(MpqsHFCube[y](x, 0)
-                                                 + MpqsHBCube[y](x, 0))
-                        + decisionOptions[k][1]*(MpqsVFCube[x](y, 0)
-                                                 + MpqsVBCube[x](y, 0))
-                        + decisionOptions[k][2]*(MpqsDBRCube[y](x, 0)
-                                                 + MpqsDBLCube[y](x, 0)
-                                                 + MpqsDTLCube[y](x, 0)
-                                                 + MpqsDTRCube[y](x, 0));
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        float cost = unarycosts(x, y, i) 
+                     + horizontal*(MpqsHFCube[y](x, i)
+                                  + MpqsHBCube[y](x, i))
+                     + vertical*(MpqsVFCube[x](y, i)
+                                + MpqsVBCube[x](y, i))
+                     + diagonal*(MpqsDBRCube[y](x, i)
+                                + MpqsDBLCube[y](x, i)
+                                + MpqsDTLCube[y](x, i)
+                                + MpqsDTRCube[y](x, i));
+        if (cost < minCost)
         {
-          float cost = unarycosts(x, y, i) 
-                       + decisionOptions[k][0]*(MpqsHFCube[y](x, i)
-                                                + MpqsHBCube[y](x, i))
-                       + decisionOptions[k][1]*(MpqsVFCube[x](y, i)
-                                                + MpqsVBCube[x](y, i))
-                       + decisionOptions[k][2]*(MpqsDBRCube[y](x, i)
-                                                + MpqsDBLCube[y](x, i)
-                                                + MpqsDTLCube[y](x, i)
-                                                + MpqsDTRCube[y](x, i));
-          if (cost < minCost)
-          {
-            minCost = cost;
-            minIndex = i;
-          }
+          minCost = cost;
+          minIndex = i;
         }
-        result(x, y) = static_cast<float>(minIndex);
       }
-      std::cout << "Computing DECISIONS... "
-                << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
-                << std::flush;
+      result(x, y) = static_cast<float>(minIndex);
     }
-    std::cout << "Computing DECISIONS... 100%" << std::endl;   
-
-    // Write results to output files
-    std::string option (NumberToString(unaryCost));
-    option.append(NumberToString(decisionOptions[k][0]));
-    option.append(NumberToString(decisionOptions[k][1]));
-    option.append(NumberToString(decisionOptions[k][2]));
-    std::string resultFile (outputFile);
-    resultFile.insert(0, "-");
-    resultFile.insert(0, option); 
-    result.writeToFloatFile(resultFile.c_str());
-
-    std::string dispEPE ("../bin/disp-epe ");
-    dispEPE.append(resultFile.c_str());
-    dispEPE.append(" ");
-    dispEPE.append("1-gt.float3");
-
-    std::cout << "Option " << option << std::endl;
-    system(dispEPE.c_str());
-
-    std::string floatToPGM ("../bin/float3-to-pgm ");
-    floatToPGM.append(resultFile);
-    floatToPGM.append(" ");
-    floatToPGM.append(resultFile);
-    floatToPGM.erase(floatToPGM.length()-6);
-    floatToPGM.append("pgm");
-    system(floatToPGM.c_str());
+    std::cout << "Computing DECISIONS... "
+              << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
+              << std::flush;
   }
+  std::cout << "Computing DECISIONS... 100%" << std::endl;  
 
-  std::cout << std::endl;
 }
 
 
@@ -754,12 +703,6 @@ int main(int argc, char** argv)
          << "image> <disparity output path>" << std::endl;
     exit(1);
   }
-  // Initiliaze global variables
-  outputFile = argv[3];
-  unaryCosts.insert(std::make_pair(0, "PixelWise Euclidean"));
-  unaryCosts.insert(std::make_pair(1, "L1"));
-  unaryCosts.insert(std::make_pair(2, "L2"));
-  unaryCosts.insert(std::make_pair(3, "NCC"));
 
   /*-----------------------------------------------------------------------
    *  Read rectified left and right input image and put them into
@@ -778,18 +721,63 @@ int main(int argc, char** argv)
    *-----------------------------------------------------------------------*/
   CMatrix<float> result(leftImg.xSize(), leftImg.ySize());
   
-  // Run all unary and message passing possibilities
+  // Matrix of all options (horizontal, vertical, diagonal)
+  int options[4][3][3] = {{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
+                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
+                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
+                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}}
+                         };
+
   int N = 7;  // NxN patches
   timer::start("SGM (CPU)");
   for (int i = 0; i < 4; ++i) {
-    sgmCPU(result, leftImg, rightImg, i, N);
+    for (int j = 0; j < 3; ++j) {
+      timer::start("SGM (CPU)");
+      int unaryCost = i;
+      int horizontal = options[i][j][0];
+      int vertical = options[i][j][1];
+      int diagonal = options[i][j][2];
+      sgmCPU(result, leftImg, rightImg, unaryCost, N,
+             horizontal, vertical, diagonal);
+
+      std::string option (NumberToString(i));
+      option.append(NumberToString(horizontal));
+      option.append(NumberToString(vertical));
+      option.append(NumberToString(diagonal));
+      std::string resultFile (argv[3]);
+      resultFile.insert(0, "-");
+      resultFile.insert(0, option); 
+      result.writeToFloatFile(resultFile.c_str());
+
+      std::string dispEPE ("../bin/disp-epe ");
+      dispEPE.append(resultFile.c_str());
+      dispEPE.append(" ");
+      dispEPE.append("1-gt.float3");
+
+      std::cout << "Option " << option << std::endl;
+      system(dispEPE.c_str());
+
+      std::string floatToPGM ("../bin/float3-to-pgm ");
+      floatToPGM.append(resultFile);
+      floatToPGM.append(" ");
+      floatToPGM.append(resultFile);
+      floatToPGM.erase(floatToPGM.length()-6);
+      floatToPGM.append("pgm");
+      system(floatToPGM.c_str());
+
+
+      timer::stop("SGM (CPU)");
+      timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
+    }
   }
+  // sgmCPU(result, leftImg, rightImg, 1, 7, 1, 1, 0);
   // Parameters
   // Result Image
   // Left Image
   // Right Image
   // unaryCost {0: PixelWise Euclidean; 1: L1 NxN; 2: L2 NxN; 3: NCC NxN}
   // N NxN patch size
+  // horizontal, vertical, diagonal Message Passing
 
   
   timer::stop("SGM (CPU)");

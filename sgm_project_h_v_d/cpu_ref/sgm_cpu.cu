@@ -300,8 +300,8 @@ void sgmCPU(CMatrix<float> &result,
       for (int i = 0; i <= MAX_DISPARITY; ++i)
       {
         if (x - i < 0) unarycosts(x, y, i) = 1.0e9f;
-        // else unarycosts(x, y, i) = unaryEuclidean(leftImg(x, y), rightImg(x - i, y));
-        else unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg, x, y, x - i, y, 7, 2);
+        else unarycosts(x, y, i) = unaryEuclidean(leftImg(x, y), rightImg(x - i, y));
+        // else unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg, x, y, x - i, y, 7, 2);
         // else unarycosts(x, y, i) = -abs(unaryNCCNeighbor(leftImg, rightImg, x, y, x - i, y, 7));
       }
     }
@@ -453,7 +453,7 @@ void sgmCPU(CMatrix<float> &result,
   std::vector<CMatrix<float> > MpqsDBRCube(leftImg.ySize()); // Diagonal to Bottom Right
   std::vector<CMatrix<float> > MpqsDBLCube(leftImg.ySize()); // Diagonal to Bottom Left
   std::vector<CMatrix<float> > MpqsDTLCube(leftImg.ySize()); // Diagonal to Top Left
-  std::vector<CMatrix<float> > MpqsDTBCube(leftImg.ySize()); // Diagonal to Top Right 
+  std::vector<CMatrix<float> > MpqsDTRCube(leftImg.ySize()); // Diagonal to Top Right 
 
   // Initialize top row of disparities matrices
   std::cout << "Computing DIAGONAL disparities... \r" << std::flush;
@@ -466,14 +466,15 @@ void sgmCPU(CMatrix<float> &result,
     for (int j = 0; j <= MAX_DISPARITY; ++j) 
     {
       MpqsDBR(0, j) = 0.0f;
-      MpqsDBL(leftImg.ySize() - 1, j) = 0.0f;
-      MpqsDTL(leftImg.ySize() - 1, j) = 0.0f;
+      MpqsDBL(0, j) = 0.0f;
+      MpqsDTL(0, j) = 0.0f;
       MpqsDTR(0, j) = 0.0f;
     }
   }
   MpqsDBRCube[0] = MpqsDBR;
   MpqsDBLCube[0] = MpqsDBL;
   MpqsDTLCube[leftImg.ySize()-1] = MpqsDTL;
+  MpqsDTRCube[leftImg.ySize()-1] = MpqsDTR;
 
   for (int y = 1; y < leftImg.ySize(); ++y)
   {
@@ -486,8 +487,6 @@ void sgmCPU(CMatrix<float> &result,
     { 
       MpqsDBR(0, j) = 0.0f;
     }
-
-
     for (int q = 1; q < leftImg.xSize(); ++q)
     {
       for (int j = 0; j <= MAX_DISPARITY; ++j)
@@ -560,6 +559,35 @@ void sgmCPU(CMatrix<float> &result,
     }
     MpqsDTLCube[leftImg.ySize()-y-1] = MpqsDTL;
 
+    /*---------------------------------------------------------------------
+     *  To Top Right pass
+     *---------------------------------------------------------------------*/
+    CMatrix<float> MpqsDTR(leftImg.xSize(), MAX_DISPARITY + 1);
+    // Initialize dispaties matrix
+    for (int j = 0; j <= MAX_DISPARITY; ++j)
+    { 
+      MpqsDTR(0, j) = 0.0f;
+    }
+    for (int q = 1; q < leftImg.xSize(); ++q)
+    {
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      {
+        MpqsDTR(q, j) = unarycosts(q - 1, leftImg.ySize() - y, 0)
+                        + MpqsDTRCube[leftImg.ySize() - y](q - 1, 0)
+                        + LAMBDA * thetapq(0, j);
+        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        {
+          float cost = unarycosts(q - 1, leftImg.ySize() - y, i)
+                       + MpqsDTRCube[leftImg.ySize() - y](q - 1, i)
+                       + LAMBDA * thetapq(i, j);
+          if (cost < MpqsDTR(q, j)) {
+            MpqsDTR(q, j) = cost;
+          }
+        }
+      }
+    }
+    MpqsDTRCube[leftImg.ySize()-y-1] = MpqsDTR;
+
     std::cout << "Computing DIAGONAL disparities... "
               << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
               << std::flush;
@@ -583,7 +611,8 @@ void sgmCPU(CMatrix<float> &result,
                       + MpqsVBCube[x](y, 0)
                       + MpqsDBRCube[y](x, 0)
                       + MpqsDBLCube[y](x, 0)
-                      + MpqsDTLCube[y](x, 0);
+                      + MpqsDTLCube[y](x, 0)
+                      + MpqsDTRCube[y](x, 0);
       for (int i = 1; i <= MAX_DISPARITY; ++i)
       {
         float cost = unarycosts(x, y, i) 
@@ -593,7 +622,8 @@ void sgmCPU(CMatrix<float> &result,
                      + MpqsVBCube[x](y, i)
                      + MpqsDBRCube[y](x, i)
                      + MpqsDBLCube[y](x, i)
-                     + MpqsDTLCube[y](x, i);
+                     + MpqsDTLCube[y](x, i)
+                     + MpqsDTRCube[y](x, i);
         if (cost < minCost)
         {
           minCost = cost;

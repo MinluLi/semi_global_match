@@ -1,0 +1,87 @@
+
+    ********************************
+          Semi-Global Matching 
+      GPU course WS2015/16 project 
+    ********************************
+
+Contacts: 
+Eddy Ilg <ilge@cs.uni-freiburg.de> (not avail. in December) 
+Thorsten Falk <falk@informatik.uni-freiburg.de>
+
+This archive contains data and code for the GPU course project. 
+
+You can work in teams up to two people. Please register your team 
+to us until Dec 10th, 2015.
+
+Folder structure:
+bin  			- Scripts and executable files
+cpu_ref  		- CPU reference implementation for 1 direction 
+data 			- Data for experiments  
+gpu_impl  		- Put your implementations here 
+libArrayUtilities  	- CMatrix, CTensor and NMath 
+Makefile  		- For compiling everything 
+tools			- Tools disp-epe and float3-to-pgm 
+
+Environment: 
+------------ 
+
+Add the "bin" folder to you PATH environment variable. E.g.: add 
+to your .bashrc 
+
+export PATH=/path/to/sgm_project/bin:$PATH
+
+Compiling: 
+---------- 
+
+In the root folder type "make install".
+
+Subfolders "include" containing the C headers and "lib" containing
+libArrayUtilities.a will be created and the evaluation binaries placed
+in "bin"
+
+Implementation:
+---------------
+
+You can assume that the maximum disparity in all sample images is 50
+so your code should cope with MAX_DISPARITY 50 as used in the CPU example
+
+Evaluation: 
+----------- 
+
+For the Sintel images (data/sintel), ground-truth is provided. You can 
+use it to compute endpoint errors. For this you have to save your 
+computed disparity to a .float3 file like: 
+
+CMatrix<float> disp; 
+// compute disp ... 
+disp.writeToFloatFile('your-disp.float3'); 
+
+You can then use the tool "disp-epe" to compute the endpoint error.
+Note that some pixels from the left image may not be visible in the 
+second image. These are called "occluded". For example, you can 
+compute overall and non-occluded endpoint errors as follows: 
+
+cd /path/to/project2015/data/sintel 
+disp-epe your-disp.float3 1-gt.float3 	         # overall EPE 
+disp-epe your-disp.float3 1-gt.float3 1-occ.pgm  # non-occluded EPE
+
+For visualization, you can also convert the .float3 files to .pgm 
+as follows: 
+
+float3-to-pgm your-disp.float3 your-disp.pgm 
+
+Submission: 
+-----------
+
+Place your GPU implementations in folder "gpu_impl" and extend the Makefile
+so that your code compiles on the pool computers. You should 
+then submit a preliminary version of your code to us (complete archive) 
+by e-mail until Mar 11th, 2016 and a final version until Mar 17th, 2016. 
+
+Name your binary "sgm_gpu" taking three arguments: 
+1.) first image,
+2.) second image, 
+3.) output path to float3 file, to which the disparity will be written. 
+
+In your submission, please include your code, a list of scores for 
+all/non-occluded pixels on Sintel and timings from computers in the pool. 
