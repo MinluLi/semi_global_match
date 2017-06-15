@@ -782,13 +782,16 @@ int main(int argc, char** argv)
 
   /*---------------------------------------------------------------------
    *  Write results to output file 
+   *  Format: [imgNumber]-[unaryCostOption]-[msgPassingOption]-gt.float3
    *---------------------------------------------------------------------*/
-  std::string msgPassOptionStr (NumberToString(msgPassingOption));
-  std::string resultFile (outputFile);
-  resultFile.insert(0, "-");
-  resultFile.insert(0, msgPassOptionStr); 
+  std::string resultFile ("-gt.float3");
+  std::string imgFileNum("");
+  imgFileNum.append(outputFile.substr(0, outputFile.size()-10));
+  resultFile.insert(0, NumberToString(msgPassingOption)); 
   resultFile.insert(0, NumberToString(unaryCostOption));
-  resultFile.insert(0, "0");
+  resultFile.insert(0, "-");
+  resultFile.insert(0, imgFileNum);
+  // Write result to file
   result.writeToFloatFile(resultFile.c_str());
 
  /*---------------------------------------------------------------------
@@ -803,14 +806,25 @@ int main(int argc, char** argv)
   }
 
   // Compute EPE against ground truth
+  // Overall EPE
   std::string dispEPE ("../bin/disp-epe ");
   dispEPE.append(resultFile);
   dispEPE.append(" ");
-  dispEPE.append(outputFile.substr(outputFile.size()-11, 1)); // Append the image number
-  dispEPE.append("-gt.float3");
+  dispEPE.append(outputFile);
   std::cout << ", Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
   std::cout << dispEPE << std::endl;
   if (system(dispEPE.c_str()) == -1) {
+    std::cerr << "Couldn't run disp-epe command" << std::endl;
+    return 1;
+  }
+
+  // Non-occluded EPE
+  std::string dispEPEocc(dispEPE);
+  dispEPEocc.append(" ");
+  dispEPEocc.append(imgFileNum);
+  dispEPEocc.append("-occ.pgm");
+  std::cout << dispEPEocc << std::endl;
+  if (system(dispEPEocc.c_str()) == -1) {
     std::cerr << "Couldn't run disp-epe command" << std::endl;
     return 1;
   }
