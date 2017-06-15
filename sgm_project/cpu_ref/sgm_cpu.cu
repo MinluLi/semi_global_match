@@ -120,9 +120,8 @@ inline float unaryEuclidean(Color const &a, Color const &b)
  *   \param yl        y position of left image pixel
  *   \param xr        x position of right image pixel
  *   \param yr        y position of right image pixel
- *   \param costFunction {L1; L2} 
+ *   \param costFunction {1: L1-norm; 2: L2-norm squared} 
  *   \param N         NxN neighborhood
- *   \param option    1: L1-norm; 2: L2-norm squared
  *
  *   \return Lx-norm for pixel neighborhood
  */
@@ -137,10 +136,10 @@ inline float unaryLxNeighbor(CMatrix<Color> const &leftImg,
   int lim = static_cast<int>(N/2);
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
-      if (xl+i > 0 && xl+i < leftImg.xSize() &&
-          yl+j > 0 && yl+j < leftImg.ySize() &&
-          xr+i > 0 && xr+i < rightImg.xSize() &&
-          yr+j > 0 && yr+j < rightImg.ySize()) {
+      if (xl+i >= 0 && xl+i < leftImg.xSize() &&
+          yl+j >= 0 && yl+j < leftImg.ySize() &&
+          xr+i >= 0 && xr+i < rightImg.xSize() &&
+          yr+j >= 0 && yr+j < rightImg.ySize()) {
         switch(costFunction) {
           case 1:
             theta += unaryL1(leftImg(xl+i, yl+j),
@@ -180,20 +179,22 @@ inline Color averagePixel(CMatrix<Color> const &Img,
   float averagePixelZ = 0.0f;
 
   int lim = N/2;
+  int numNeighbors = 0;
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
-      if (x+i > 0 && x+i < Img.xSize() &&
-          y+j > 0 && y+j < Img.ySize()) {
+      if (x+i >= 0 && x+i < Img.xSize() &&
+          y+j >= 0 && y+j < Img.ySize()) {
         averagePixelX += static_cast<float>(Img(x+i, y+j).x);
         averagePixelY += static_cast<float>(Img(x+i, y+j).y);
         averagePixelZ += static_cast<float>(Img(x+i, y+j).z);
+        numNeighbors += 1;
       }
     }
   }
 
-  averagePixel.x = averagePixelX/(N*N);
-  averagePixel.y = averagePixelY/(N*N);
-  averagePixel.z = averagePixelZ/(N*N);
+  averagePixel.x = averagePixelX/(numNeighbors);
+  averagePixel.y = averagePixelY/(numNeighbors);
+  averagePixel.z = averagePixelZ/(numNeighbors);
   return averagePixel;
 }
 
@@ -267,10 +268,11 @@ inline float unaryNCCNeighbor(CMatrix<Color> const &leftImg,
 
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
-      if (xl+i > 0 && xl+i < leftImg.xSize() &&
-          yl+j > 0 && yl+j < leftImg.ySize() &&
-          xr+i > 0 && xr+i < rightImg.xSize() &&
-          yr+j > 0 && yr+j < rightImg.ySize()) {
+      // Check if neighbor is inside the image
+      if (xl+i >= 0 && xl+i < leftImg.xSize() && 
+          yl+j >= 0 && yl+j < leftImg.ySize() &&
+          xr+i >= 0 && xr+i < rightImg.xSize() &&
+          yr+j >= 0 && yr+j < rightImg.ySize()) {
         theta += pixelDotProd(
                   pixelDifference(leftImg(xl+i, yl+j), averagePixelLeftImg),            
                   pixelDifference(rightImg(xr+i, yr+j), averagePixelRightImg));
@@ -354,10 +356,9 @@ void sgmCPU(CMatrix<float> &result,
                                                      2, N);
               break;
             case 4:  // NxN NCC
-              unarycosts(x, y, i) = -abs(unaryNCCNeighbor(leftImg,
-                                                          rightImg,
-                                                           x, y, x - i, y,
-                                                           N));
+              unarycosts(x, y, i) = -unaryNCCNeighbor(leftImg, rightImg,
+                                                      x, y, x - i, y,
+                                                      N);
               break;
           }
         }
