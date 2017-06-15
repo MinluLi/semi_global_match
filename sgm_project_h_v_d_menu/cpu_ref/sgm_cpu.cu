@@ -5,7 +5,9 @@
 #include <sstream>
 #include <iostream>
 #include <iomanip>
-
+#include <map>
+#include <string>
+#include <stdlib.h>
 
 // Convert integer to std::string
 template <typename T>
@@ -310,20 +312,18 @@ inline float thetapq(int a, int b)
  *   \param result The resulting matrix with disparities
  *   \param leftImg Left Image
  *   \param rightImg Right Image
- *   \param unaryCost Type of unary cost: {pixelWise, L1, L2, NCC}
+ *   \param unaryCostOption {pixelWise, L1, L2, NCC}
  *   \param N NxN patch size for L1, L2, NCC unary costs
- *   \param horizontal Horizontal message passing. Set to 1 to activate
- *   \param vertical Vertical message passing. Set to 1 to activate
- *   \param diagonal Diagonal message passing. Set to 1 to activate
+ *   \param msgPassingOption
  *
  *   \return void, just writes the result in the result matrix
  */
 /*======================================================================*/
 void sgmCPU(CMatrix<float> &result,
             CMatrix<Color> const &leftImg, CMatrix<Color> const &rightImg,
-            int unaryCost, int N,
-            bool horizontal, bool vertical, bool diagonal)
+            int unaryCostOption, int N, int msgPassingOption)
 {
+  std::cout << std::endl;
   /*-----------------------------------------------------------------------
    *  Unary cost computation 
    *-----------------------------------------------------------------------*/
@@ -338,22 +338,22 @@ void sgmCPU(CMatrix<float> &result,
       {
         if (x - i < 0) unarycosts(x, y, i) = 1.0e9f;
         else {
-          switch(unaryCost) {
-            case 0:  // Pixel-wise Euclidean distance
+          switch(unaryCostOption) {
+            case 1:  // Pixel-wise Euclidean distance
               unarycosts(x, y, i) = unaryEuclidean(leftImg(x, y),
                                                    rightImg(x - i, y));
               break;
-            case 1:  // NxN L1 distance
+            case 2:  // NxN L1 distance
               unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg,
                                                      x, y, x - i, y,
-                                                     unaryCost, N);
+                                                     1, N);
               break;
-            case 2:  // NxN L2 distance
+            case 3:  // NxN L2 distance
               unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg,
                                                      x, y, x - i, y,
-                                                     unaryCost, N);
+                                                     2, N);
               break;
-            case 3:  // NxN NCC
+            case 4:  // NxN NCC
               unarycosts(x, y, i) = -abs(unaryNCCNeighbor(leftImg,
                                                           rightImg,
                                                            x, y, x - i, y,
@@ -376,278 +376,284 @@ void sgmCPU(CMatrix<float> &result,
   /* HORIZONTAL (scanline-wise) message Passing */
   std::vector<CMatrix<float> > MpqsHFCube(leftImg.ySize());  // Horizontal Forward 
   std::vector<CMatrix<float> > MpqsHBCube(leftImg.ySize());  // Horizontal Backward
-  std::cout << "Computing HORIZONTAL disparities... \r" << std::flush;
-  for (int y = 0; y < leftImg.ySize(); ++y)
+  if (msgPassingOption == 1 || msgPassingOption == 2 || msgPassingOption == 3)
   {
-    /*---------------------------------------------------------------------
-     *  Forward pass
-     *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsHF(leftImg.xSize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    { 
-      MpqsHF(0, j) = 0.0f;
-    }
-    for (int q = 1; q < leftImg.xSize(); ++q)
+        std::cout << "Computing HORIZONTAL disparities... \r" << std::flush;
+    for (int y = 0; y < leftImg.ySize(); ++y)
     {
+      /*---------------------------------------------------------------------
+       *  Forward pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsHF(leftImg.xSize(), MAX_DISPARITY + 1);
       for (int j = 0; j <= MAX_DISPARITY; ++j)
+      { 
+        MpqsHF(0, j) = 0.0f;
+      }
+      for (int q = 1; q < leftImg.xSize(); ++q)
       {
-        MpqsHF(q, j) = unarycosts(q - 1, y, 0) + MpqsHF(q - 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
         {
-          float cost = unarycosts(q - 1, y, i) + MpqsHF(q - 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsHF(q, j)) {
-            MpqsHF(q, j) = cost;
+          MpqsHF(q, j) = unarycosts(q - 1, y, 0) + MpqsHF(q - 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q - 1, y, i) + MpqsHF(q - 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsHF(q, j)) {
+              MpqsHF(q, j) = cost;
+            }
           }
         }
       }
-    }
-    MpqsHFCube[y] = MpqsHF;
+      MpqsHFCube[y] = MpqsHF;
 
-    /*---------------------------------------------------------------------
-     *  Backward pass
-     *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsHB(leftImg.xSize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    {
-      MpqsHB(leftImg.xSize() - 1, j) = 0.0f;
-    }
-    for (int q = leftImg.xSize() - 2; q >= 0; --q)
-    {
+      /*---------------------------------------------------------------------
+       *  Backward pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsHB(leftImg.xSize(), MAX_DISPARITY + 1);
       for (int j = 0; j <= MAX_DISPARITY; ++j)
       {
-        MpqsHB(q, j) = unarycosts(q + 1, y, 0) + MpqsHB(q + 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        MpqsHB(leftImg.xSize() - 1, j) = 0.0f;
+      }
+      for (int q = leftImg.xSize() - 2; q >= 0; --q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
         {
-          float cost = unarycosts(q + 1, y, i) + MpqsHB(q + 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsHB(q, j)) {
-            MpqsHB(q, j) = cost;
+          MpqsHB(q, j) = unarycosts(q + 1, y, 0) + MpqsHB(q + 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q + 1, y, i) + MpqsHB(q + 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsHB(q, j)) {
+              MpqsHB(q, j) = cost;
+            }
           }
         }
       }
-    }
-    MpqsHBCube[y] = MpqsHB;
+      MpqsHBCube[y] = MpqsHB;
 
-    std::cout << "Computing HORIZONTAL disparities... "
-              << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
-              << std::flush;
+      std::cout << "Computing HORIZONTAL disparities... "
+                << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
+                << std::flush;
+    }
   }
-  std::cout << "Computing HORIZONTAL disparities...100%" << std::endl;
+    std::cout << "Computing HORIZONTAL disparities...100%" << std::endl;
    
 
   /* VERTICAL (scanline-wise) message Passing */
   std::vector<CMatrix<float> > MpqsVFCube(leftImg.xSize());  // Vertical Forward
   std::vector<CMatrix<float> > MpqsVBCube(leftImg.xSize());  // Vertical Backward
-  std::cout << "Computing VERTICAL disparities... \r" << std::flush;
-  for (int x = 0; x < leftImg.xSize(); ++x)
+  if (msgPassingOption == 2 || msgPassingOption == 3)
   {
-    /*---------------------------------------------------------------------
-     *  Forward pass (Top to Bottom)
-     *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsVF(leftImg.ySize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
+    std::cout << "Computing VERTICAL disparities... \r" << std::flush;
+    for (int x = 0; x < leftImg.xSize(); ++x)
     {
-      MpqsVF(0, j) = 0.0f;
-    } 
-    for (int q = 1; q < leftImg.ySize(); ++q)
-    {
+      /*---------------------------------------------------------------------
+       *  Forward pass (Top to Bottom)
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsVF(leftImg.ySize(), MAX_DISPARITY + 1);
       for (int j = 0; j <= MAX_DISPARITY; ++j)
       {
-        MpqsVF(q, j) = unarycosts(x, q - 1, 0) + MpqsVF(q - 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        MpqsVF(0, j) = 0.0f;
+      } 
+      for (int q = 1; q < leftImg.ySize(); ++q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
         {
-          float cost = unarycosts(x, q - 1, i) + MpqsVF(q - 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsVF(q, j)) {
-            MpqsVF(q, j) = cost;
-          } 
+          MpqsVF(q, j) = unarycosts(x, q - 1, 0) + MpqsVF(q - 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(x, q - 1, i) + MpqsVF(q - 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsVF(q, j)) {
+              MpqsVF(q, j) = cost;
+            } 
+          }
         }
       }
-    }
-    MpqsVFCube[x] = MpqsVF;
+      MpqsVFCube[x] = MpqsVF;
 
-    /*---------------------------------------------------------------------
-     *  Backward pass (Bottom to Top)
-     *---------------------------------------------------------------------*/
-    CMatrix<float> MpqsVB(leftImg.ySize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    {
-      MpqsVB(leftImg.ySize() - 1, j) = 0.0f;
-    }
-    for (int q = leftImg.ySize() - 2; q >= 0; --q)
-    {
+      /*---------------------------------------------------------------------
+       *  Backward pass (Bottom to Top)
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsVB(leftImg.ySize(), MAX_DISPARITY + 1);
       for (int j = 0; j <= MAX_DISPARITY; ++j)
       {
-        MpqsVB(q, j) = unarycosts(x, q + 1, 0) + MpqsVB(q + 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        MpqsVB(leftImg.ySize() - 1, j) = 0.0f;
+      }
+      for (int q = leftImg.ySize() - 2; q >= 0; --q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
         {
-          float cost = unarycosts(x, q + 1, i) + MpqsVB(q + 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsVB(q, j)) {
-            MpqsVB(q, j) = cost;
-          } 
+          MpqsVB(q, j) = unarycosts(x, q + 1, 0) + MpqsVB(q + 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(x, q + 1, i) + MpqsVB(q + 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsVB(q, j)) {
+              MpqsVB(q, j) = cost;
+            } 
+          }
         }
       }
-    }
-    MpqsVBCube[x] = MpqsVB;
+      MpqsVBCube[x] = MpqsVB;
 
-    std::cout << "Computing VERTICAL disparities... "
-              << static_cast<int>((100.0f * x) / leftImg.xSize()) << "% \r"
-              << std::flush;
+      std::cout << "Computing VERTICAL disparities... "
+                << static_cast<int>((100.0f * x) / leftImg.xSize()) << "% \r"
+                << std::flush;
+    }
+    std::cout << "Computing VERTICAL disparities...100%" << std::endl;
   }
-  std::cout << "Computing VERTICAL disparities...100%" << std::endl;
-
 
   /* DIAGONAL message Passing */
   std::vector<CMatrix<float> > MpqsDBRCube(leftImg.ySize()); // Diagonal to Bottom Right
   std::vector<CMatrix<float> > MpqsDBLCube(leftImg.ySize()); // Diagonal to Bottom Left
   std::vector<CMatrix<float> > MpqsDTLCube(leftImg.ySize()); // Diagonal to Top Left
   std::vector<CMatrix<float> > MpqsDTRCube(leftImg.ySize()); // Diagonal to Top Right 
-
-  // Initialize top row of disparities matrices
-  std::cout << "Computing DIAGONAL disparities... \r" << std::flush;
-  CMatrix<float> MpqsDBR(leftImg.xSize(), MAX_DISPARITY + 1);
-  CMatrix<float> MpqsDBL(leftImg.xSize(), MAX_DISPARITY + 1);
-  CMatrix<float> MpqsDTL(leftImg.xSize(), MAX_DISPARITY + 1);
-  CMatrix<float> MpqsDTR(leftImg.xSize(), MAX_DISPARITY + 1);
-  for (int x = 0; x < leftImg.xSize(); ++x)
+  if (msgPassingOption == 3)
   {
-    for(int j = 0; j <= MAX_DISPARITY; ++j) 
-    {
-      MpqsDBR(0, j) = 0.0f;
-      MpqsDBL(0, j) = 0.0f;
-      MpqsDTL(0, j) = 0.0f;
-      MpqsDTR(0, j) = 0.0f;
-    }
-  }
-  MpqsDBRCube[0] = MpqsDBR;
-  MpqsDBLCube[0] = MpqsDBL;
-  MpqsDTLCube[leftImg.ySize()-1] = MpqsDTL;
-  MpqsDTRCube[leftImg.ySize()-1] = MpqsDTR;
-
-  for (int y = 1; y < leftImg.ySize(); ++y)
-  {
-    /*---------------------------------------------------------------------
-     *  To Bottom Right pass
-     *---------------------------------------------------------------------*/
+    // Initialize top row of disparities matrices
+    std::cout << "Computing DIAGONAL disparities... \r" << std::flush;
     CMatrix<float> MpqsDBR(leftImg.xSize(), MAX_DISPARITY + 1);
-    // Initialize dispaties matrix
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    { 
-      MpqsDBR(0, j) = 0.0f;
-    }
-    for (int q = 1; q < leftImg.xSize(); ++q)
-    {
-      for (int j = 0; j <= MAX_DISPARITY; ++j)
-      {
-        MpqsDBR(q, j) = unarycosts(q - 1, y - 1, 0) + MpqsDBRCube[y-1](q - 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
-        {
-          float cost = unarycosts(q - 1, y - 1, i) + MpqsDBRCube[y-1](q - 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsDBR(q, j)) {
-            MpqsDBR(q, j) = cost;
-          }
-        }
-      }
-    }
-    MpqsDBRCube[y] = MpqsDBR;
-
-    /*---------------------------------------------------------------------
-     *  To Bottom Left pass
-     *---------------------------------------------------------------------*/
     CMatrix<float> MpqsDBL(leftImg.xSize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    {
-      MpqsDBL(leftImg.xSize() - 1, j) = 0.0f;
-    }
-    for (int q = leftImg.xSize() - 2; q >= 0; --q)
-    {
-      for (int j = 0; j <= MAX_DISPARITY; ++j)
-      {
-        MpqsDBL(q, j) = unarycosts(q + 1, y - 1, 0) + MpqsDBLCube[y-1](q + 1, 0) +
-              LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
-        {
-          float cost = unarycosts(q + 1, y - 1, i) + MpqsDBLCube[y-1](q + 1, i) +
-              LAMBDA * thetapq(i, j);
-          if (cost < MpqsDBL(q, j)) {
-            MpqsDBL(q, j) = cost;
-          }
-        }
-      }
-    }
-    MpqsDBLCube[y] = MpqsDBL;
-
-    /*---------------------------------------------------------------------
-     *  To Top Left pass
-     *---------------------------------------------------------------------*/
     CMatrix<float> MpqsDTL(leftImg.xSize(), MAX_DISPARITY + 1);
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    {
-      MpqsDTL(leftImg.xSize() - 1, j) = 0.0f;
-    }
-    for (int q = leftImg.xSize() - 2; q >= 0; --q)
-    {
-      for (int j = 0; j <= MAX_DISPARITY; ++j)
-      {
-        MpqsDTL(q, j) = unarycosts(q + 1, leftImg.ySize() - y, 0)
-                        + MpqsDTLCube[leftImg.ySize() - y](q + 1, 0)
-                        + LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
-        {
-          float cost = unarycosts(q + 1, leftImg.ySize(), i) 
-                       + MpqsDTLCube[leftImg.ySize() - y](q + 1, i) 
-                       + LAMBDA * thetapq(i, j);
-          if (cost < MpqsDTL(q, j)) {
-            MpqsDTL(q, j) = cost;
-          }
-        }
-      }
-    }
-    MpqsDTLCube[leftImg.ySize()-y-1] = MpqsDTL;
-
-    /*---------------------------------------------------------------------
-     *  To Top Right pass
-     *---------------------------------------------------------------------*/
     CMatrix<float> MpqsDTR(leftImg.xSize(), MAX_DISPARITY + 1);
-    // Initialize dispaties matrix
-    for (int j = 0; j <= MAX_DISPARITY; ++j)
-    { 
-      MpqsDTR(0, j) = 0.0f;
-    }
-    for (int q = 1; q < leftImg.xSize(); ++q)
+    for (int x = 0; x < leftImg.xSize(); ++x)
     {
-      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      for(int j = 0; j <= MAX_DISPARITY; ++j) 
       {
-        MpqsDTR(q, j) = unarycosts(q - 1, leftImg.ySize() - y, 0)
-                        + MpqsDTRCube[leftImg.ySize() - y](q - 1, 0)
-                        + LAMBDA * thetapq(0, j);
-        for (int i = 1; i <= MAX_DISPARITY; ++i)
+        MpqsDBR(0, j) = 0.0f;
+        MpqsDBL(0, j) = 0.0f;
+        MpqsDTL(0, j) = 0.0f;
+        MpqsDTR(0, j) = 0.0f;
+      }
+    }
+    MpqsDBRCube[0] = MpqsDBR;
+    MpqsDBLCube[0] = MpqsDBL;
+    MpqsDTLCube[leftImg.ySize()-1] = MpqsDTL;
+    MpqsDTRCube[leftImg.ySize()-1] = MpqsDTR;
+
+    for (int y = 1; y < leftImg.ySize(); ++y)
+    {
+      /*---------------------------------------------------------------------
+       *  To Bottom Right pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsDBR(leftImg.xSize(), MAX_DISPARITY + 1);
+      // Initialize dispaties matrix
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      { 
+        MpqsDBR(0, j) = 0.0f;
+      }
+      for (int q = 1; q < leftImg.xSize(); ++q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
         {
-          float cost = unarycosts(q - 1, leftImg.ySize() - y, i)
-                       + MpqsDTRCube[leftImg.ySize() - y](q - 1, i)
-                       + LAMBDA * thetapq(i, j);
-          if (cost < MpqsDTR(q, j)) {
-            MpqsDTR(q, j) = cost;
+          MpqsDBR(q, j) = unarycosts(q - 1, y - 1, 0) + MpqsDBRCube[y-1](q - 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q - 1, y - 1, i) + MpqsDBRCube[y-1](q - 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsDBR(q, j)) {
+              MpqsDBR(q, j) = cost;
+            }
           }
         }
       }
+      MpqsDBRCube[y] = MpqsDBR;
+
+      /*---------------------------------------------------------------------
+       *  To Bottom Left pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsDBL(leftImg.xSize(), MAX_DISPARITY + 1);
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      {
+        MpqsDBL(leftImg.xSize() - 1, j) = 0.0f;
+      }
+      for (int q = leftImg.xSize() - 2; q >= 0; --q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
+        {
+          MpqsDBL(q, j) = unarycosts(q + 1, y - 1, 0) + MpqsDBLCube[y-1](q + 1, 0) +
+                LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q + 1, y - 1, i) + MpqsDBLCube[y-1](q + 1, i) +
+                LAMBDA * thetapq(i, j);
+            if (cost < MpqsDBL(q, j)) {
+              MpqsDBL(q, j) = cost;
+            }
+          }
+        }
+      }
+      MpqsDBLCube[y] = MpqsDBL;
+
+      /*---------------------------------------------------------------------
+       *  To Top Left pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsDTL(leftImg.xSize(), MAX_DISPARITY + 1);
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      {
+        MpqsDTL(leftImg.xSize() - 1, j) = 0.0f;
+      }
+      for (int q = leftImg.xSize() - 2; q >= 0; --q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
+        {
+          MpqsDTL(q, j) = unarycosts(q + 1, leftImg.ySize() - y, 0)
+                          + MpqsDTLCube[leftImg.ySize() - y](q + 1, 0)
+                          + LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q + 1, leftImg.ySize(), i) 
+                         + MpqsDTLCube[leftImg.ySize() - y](q + 1, i) 
+                         + LAMBDA * thetapq(i, j);
+            if (cost < MpqsDTL(q, j)) {
+              MpqsDTL(q, j) = cost;
+            }
+          }
+        }
+      }
+      MpqsDTLCube[leftImg.ySize()-y-1] = MpqsDTL;
+
+      /*---------------------------------------------------------------------
+       *  To Top Right pass
+       *---------------------------------------------------------------------*/
+      CMatrix<float> MpqsDTR(leftImg.xSize(), MAX_DISPARITY + 1);
+      // Initialize dispaties matrix
+      for (int j = 0; j <= MAX_DISPARITY; ++j)
+      { 
+        MpqsDTR(0, j) = 0.0f;
+      }
+      for (int q = 1; q < leftImg.xSize(); ++q)
+      {
+        for (int j = 0; j <= MAX_DISPARITY; ++j)
+        {
+          MpqsDTR(q, j) = unarycosts(q - 1, leftImg.ySize() - y, 0)
+                          + MpqsDTRCube[leftImg.ySize() - y](q - 1, 0)
+                          + LAMBDA * thetapq(0, j);
+          for (int i = 1; i <= MAX_DISPARITY; ++i)
+          {
+            float cost = unarycosts(q - 1, leftImg.ySize() - y, i)
+                         + MpqsDTRCube[leftImg.ySize() - y](q - 1, i)
+                         + LAMBDA * thetapq(i, j);
+            if (cost < MpqsDTR(q, j)) {
+              MpqsDTR(q, j) = cost;
+            }
+          }
+        }
+      }
+      MpqsDTRCube[leftImg.ySize()-y-1] = MpqsDTR;
+
+      std::cout << "Computing DIAGONAL disparities... "
+                << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
+                << std::flush;
     }
-    MpqsDTRCube[leftImg.ySize()-y-1] = MpqsDTR;
-
-    std::cout << "Computing DIAGONAL disparities... "
-              << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
-              << std::flush;
+    std::cout << "Computing DIAGONAL disparities...100%" << std::endl;
   }
-  std::cout << "Computing DIAGONAL disparities...100%" << std::endl;
-
 
   /*---------------------------------------------------------------------
    *  Decision
@@ -658,26 +664,32 @@ void sgmCPU(CMatrix<float> &result,
     for (int x = 0; x < leftImg.xSize(); ++x)
     {
       int minIndex = 0;
-      float minCost = unarycosts(x, y, 0) 
-                      + horizontal*(MpqsHFCube[y](x, 0)
-                                    + MpqsHBCube[y](x, 0))
-                      + vertical*(MpqsVFCube[x](y, 0)
-                                  + MpqsVBCube[x](y, 0))
-                      + diagonal*(MpqsDBRCube[y](x, 0)
-                                 + MpqsDBLCube[y](x, 0)
-                                 + MpqsDTLCube[y](x, 0)
-                                 + MpqsDTRCube[y](x, 0));
+      float minCost = unarycosts(x, y, 0);
+      if (msgPassingOption == 1 || msgPassingOption == 2 || msgPassingOption == 3) {
+        minCost += MpqsHFCube[y](x, 0) + MpqsHBCube[y](x, 0);
+      }
+      if (msgPassingOption == 2 || msgPassingOption == 3) {
+        minCost += MpqsVFCube[x](y, 0) + MpqsVBCube[x](y, 0);
+      }
+      if (msgPassingOption == 3) {
+        minCost += MpqsDBRCube[y](x, 0) + MpqsDBLCube[y](x, 0)
+                   + MpqsDTLCube[y](x, 0) + MpqsDTRCube[y](x, 0);
+      }
+
       for (int i = 1; i <= MAX_DISPARITY; ++i)
       {
-        float cost = unarycosts(x, y, i) 
-                     + horizontal*(MpqsHFCube[y](x, i)
-                                  + MpqsHBCube[y](x, i))
-                     + vertical*(MpqsVFCube[x](y, i)
-                                + MpqsVBCube[x](y, i))
-                     + diagonal*(MpqsDBRCube[y](x, i)
-                                + MpqsDBLCube[y](x, i)
-                                + MpqsDTLCube[y](x, i)
-                                + MpqsDTRCube[y](x, i));
+        float cost = unarycosts(x, y, i);
+        if (msgPassingOption == 1 || msgPassingOption == 2 || msgPassingOption == 3) {
+          cost += MpqsHFCube[y](x, i) + MpqsHBCube[y](x, i);
+        }
+        if (msgPassingOption == 2 || msgPassingOption == 3) {
+          cost += MpqsVFCube[x](y, i) + MpqsVBCube[x](y, i);
+        }
+        if (msgPassingOption == 3) {
+          cost += MpqsDBRCube[y](x, i) + MpqsDBLCube[y](x, i)
+                  + MpqsDTLCube[y](x, i) + MpqsDTRCube[y](x, i);
+        }
+
         if (cost < minCost)
         {
           minCost = cost;
@@ -690,8 +702,7 @@ void sgmCPU(CMatrix<float> &result,
               << static_cast<int>((100.0f * y) / leftImg.ySize()) << "% \r"
               << std::flush;
   }
-  std::cout << "Computing DECISIONS... 100%" << std::endl;  
-
+  std::cout << "Computing DECISIONS... 100%" << std::endl;   
 }
 
 
@@ -702,6 +713,48 @@ int main(int argc, char** argv)
     std::cerr << "usage: " << argv[0] << " <path to left image> <path to right "
          << "image> <disparity output path>" << std::endl;
     exit(1);
+  }
+  std::string outputFile(argv[3]);
+  // unaryCosts map
+  std::map<int, std::string> unaryCostsMap;
+  unaryCostsMap.insert(std::make_pair(1, "PixelWise Euclidean"));
+  unaryCostsMap.insert(std::make_pair(2, "L1"));
+  unaryCostsMap.insert(std::make_pair(3, "L2"));
+  unaryCostsMap.insert(std::make_pair(4, "NCC"));
+  // msgPassOption map (horizontal, vertical, diagonal)
+  std::map<int, std::string> msgPassOptionMap;
+  msgPassOptionMap.insert(std::make_pair(1, "horizontal"));
+  msgPassOptionMap.insert(std::make_pair(2, "horizontal + vertical"));
+  msgPassOptionMap.insert(std::make_pair(3, "horizontal + vertical + diagonal"));
+
+  /*-----------------------------------------------------------------------
+   *  Menu with unary cost and message passing options
+   *-----------------------------------------------------------------------*/
+  int unaryCostOption = 0;
+  int N;
+  while (unaryCostOption < 1 || unaryCostOption > 4) {
+    std::cout << "**************************************************" << std::endl;
+    std::cout << "Unary cost options:" << std::endl;
+    std::cout << "1 - Pixel-wise euclidean" << std::endl;
+    std::cout << "2 - L1 NxN patch" << std::endl;
+    std::cout << "3 - L2 NxN patch" << std::endl;
+    std::cout << "4 - NCC NxN patch" << std::endl;
+    std::cin >> unaryCostOption;
+  }
+  std::cout << std::endl;
+  if (unaryCostOption != 1) {
+    std::cout << "Select NxN patch: ";
+    std::cin >> N;
+  }
+  
+  int msgPassingOption = 0;
+  std::cout << std::endl;
+  while (msgPassingOption < 1 || msgPassingOption > 3) {
+    std::cout << "Message Passing Options:" << std::endl;
+    std::cout << "1 - Horizontal" << std::endl;
+    std::cout << "2 - Horizontal + Vertical" << std::endl;
+    std::cout << "3 - Horizontal + Vertical + Diagonal" << std::endl;
+    std::cin >> msgPassingOption;
   }
 
   /*-----------------------------------------------------------------------
@@ -721,67 +774,60 @@ int main(int argc, char** argv)
    *-----------------------------------------------------------------------*/
   CMatrix<float> result(leftImg.xSize(), leftImg.ySize());
   
-  // Matrix of all options (horizontal, vertical, diagonal)
-  int options[4][3][3] = {{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
-                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
-                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}},
-                          {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}}
-                         };
-
-  int N = 7;  // NxN patches
+  // Compute Semi-global matching
   timer::start("SGM (CPU)");
-  for (int i = 0; i < 4; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      timer::start("SGM (CPU)");
-      int unaryCost = i;
-      int horizontal = options[i][j][0];
-      int vertical = options[i][j][1];
-      int diagonal = options[i][j][2];
-      sgmCPU(result, leftImg, rightImg, unaryCost, N,
-             horizontal, vertical, diagonal);
-
-      std::string option (NumberToString(i));
-      option.append(NumberToString(horizontal));
-      option.append(NumberToString(vertical));
-      option.append(NumberToString(diagonal));
-      std::string resultFile (argv[3]);
-      resultFile.insert(0, "-");
-      resultFile.insert(0, option); 
-      result.writeToFloatFile(resultFile.c_str());
-
-      std::string dispEPE ("../bin/disp-epe ");
-      dispEPE.append(resultFile.c_str());
-      dispEPE.append(" ");
-      dispEPE.append("1-gt.float3");
-
-      std::cout << "Option " << option << std::endl;
-      system(dispEPE.c_str());
-
-      std::string floatToPGM ("../bin/float3-to-pgm ");
-      floatToPGM.append(resultFile);
-      floatToPGM.append(" ");
-      floatToPGM.append(resultFile);
-      floatToPGM.erase(floatToPGM.length()-6);
-      floatToPGM.append("pgm");
-      system(floatToPGM.c_str());
-
-
-      timer::stop("SGM (CPU)");
-      timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
-    }
-  }
-  // sgmCPU(result, leftImg, rightImg, 1, 7, 1, 1, 0);
-  // Parameters
-  // Result Image
-  // Left Image
-  // Right Image
-  // unaryCost {0: PixelWise Euclidean; 1: L1 NxN; 2: L2 NxN; 3: NCC NxN}
-  // N NxN patch size
-  // horizontal, vertical, diagonal Message Passing
-
-  
+  sgmCPU(result, leftImg, rightImg, unaryCostOption, N, msgPassingOption);
   timer::stop("SGM (CPU)");
   timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
+
+  /*---------------------------------------------------------------------
+   *  Write results to output file 
+   *---------------------------------------------------------------------*/
+  std::string msgPassOptionStr (NumberToString(msgPassingOption));
+  std::string resultFile (outputFile);
+  resultFile.insert(0, "-");
+  resultFile.insert(0, msgPassOptionStr); 
+  resultFile.insert(0, NumberToString(unaryCostOption));
+  resultFile.insert(0, "0");
+  result.writeToFloatFile(resultFile.c_str());
+
+ /*---------------------------------------------------------------------
+  *  Write result to terminal
+  *---------------------------------------------------------------------*/
+  std::cout << std::endl;
+  if (unaryCostOption == 1) {
+    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
+  } else {
+    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
+    std::cout << " " << N << "x" << N << " patches";
+  }
+
+  // Compute EPE against ground truth
+  std::string dispEPE ("../bin/disp-epe ");
+  dispEPE.append(resultFile);
+  dispEPE.append(" ");
+  dispEPE.append(outputFile.substr(outputFile.size()-11, 1)); // Append the image number
+  dispEPE.append("-gt.float3");
+  std::cout << ", Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
+  std::cout << dispEPE << std::endl;
+  if (system(dispEPE.c_str()) == -1) {
+    std::cerr << "Couldn't run disp-epe command" << std::endl;
+    return 1;
+  }
+
+  // Generate PGM image from resulting disparity map
+  std::cout << std::endl << "Generate PGM image from file" << std::endl;
+  std::string floatToPGM ("../bin/float3-to-pgm ");
+  floatToPGM.append(resultFile);
+  floatToPGM.append(" ");
+  floatToPGM.append(resultFile);
+  floatToPGM.erase(floatToPGM.length()-6);
+  floatToPGM.append("pgm");
+  std::cout << floatToPGM << std::endl;
+  if (system(floatToPGM.c_str()) == -1) {
+    std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
+    return 1;
+  }
 
   return 0;
 }
