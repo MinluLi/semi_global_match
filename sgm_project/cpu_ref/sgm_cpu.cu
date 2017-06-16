@@ -26,7 +26,7 @@ typedef uchar4 Color;
 /*-------------------------------------------------------------------------
  *  Regularization weight
  *-------------------------------------------------------------------------*/
-static float const LAMBDA = 100.0f;
+static float const LAMBDA = 50.0f;
 
 /*-------------------------------------------------------------------------
  *  Maximum disparity (number of labels in the message passing algorithm)
@@ -356,9 +356,9 @@ void sgmCPU(CMatrix<float> &result,
                                                      2, N);
               break;
             case 4:  // NxN NCC
-              unarycosts(x, y, i) = -unaryNCCNeighbor(leftImg, rightImg,
-                                                      x, y, x - i, y,
-                                                      N);
+              unarycosts(x, y, i) = -abs(unaryNCCNeighbor(leftImg, rightImg,
+                                                          x, y, x - i, y,
+                                                          N));
               break;
           }
         }
