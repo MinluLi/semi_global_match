@@ -829,8 +829,6 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
  *   Compute unary costs with L1-norm for pixel neighborhood
  *
  *   \param unaryCostsCubeD Cube with unary costs
- *   \param leftImgD Left image aligned
- *   \param rightImgD Right image aligned
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
  *   \param N NxN neighborhood
@@ -839,7 +837,7 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
  */
 /*======================================================================*/
 __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
-    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+    int xSize, int ySize, int N)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -896,8 +894,6 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
  *   Compute unary costs with L2-norm for pixel neighborhood
  *
  *   \param unaryCostsCubeD Cube with unary costs
- *   \param leftImgD Left image aligned
- *   \param rightImgD Right image aligned
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
  *   \param N NxN neighborhood
@@ -906,7 +902,7 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
  */
 /*======================================================================*/
 __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
-    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+    int xSize, int ySize, int N)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -963,8 +959,6 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
  *   Compute Normalized cross-correlation (NCC) 
  *
  *   \param unaryCostsCubeD Cube with unary costs
- *   \param leftImgD Left image aligned
- *   \param rightImgD Right image aligned
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
  *   \param N NxN neighborhood
@@ -973,7 +967,7 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
  */
 /*======================================================================*/
 __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
-    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+    int xSize, int ySize, int N)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -1178,15 +1172,15 @@ int main(int argc, char** argv)
                                               leftImg.xSize(), leftImg.ySize());
     }
     if (unaryCostOption == 2) {
-      unaryCostL1NormKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
-                                          leftImg.xSize(), leftImg.ySize(), N);
+      unaryCostL1NormKernel<<<grid, block>>>(unaryCostsCubeD,
+                                             leftImg.xSize(), leftImg.ySize(), N);
     }
     if (unaryCostOption == 3) {
-      unaryCostL2NormKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
-                                          leftImg.xSize(), leftImg.ySize(), N);
+      unaryCostL2NormKernel<<<grid, block>>>(unaryCostsCubeD,
+                                             leftImg.xSize(), leftImg.ySize(), N);
     }
     if (unaryCostOption == 4) {
-      unaryCostNCCKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
+      unaryCostNCCKernel<<<grid, block>>>(unaryCostsCubeD,
                                           leftImg.xSize(), leftImg.ySize(), N);
     }
 
