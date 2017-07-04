@@ -15,6 +15,10 @@
 // Block dimension of CUDA kernels
 #define BLOCK_DIM 16
 
+// Image Textures
+texture<uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> texLeft;
+texture<uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> texRight;
+
 /*-------------------------------------------------------------------------
  *  Throw errors in CUDA function calls
  *-------------------------------------------------------------------------*/
@@ -112,7 +116,7 @@ __host__ __device__ inline float unaryL2Squared(Color const &a, Color const &b)
  *   \return L1-distance of a and b
  */
 /*======================================================================*/
-inline float unaryL1(Color const &a, Color const &b)
+__host__ __device__ inline float unaryL1(Color const &a, Color const &b)
 {
   return abs(static_cast<float>(a.x) - static_cast<float>(b.x)) +
          abs(static_cast<float>(a.y) - static_cast<float>(b.y)) +
@@ -739,17 +743,16 @@ void sgmCPU(CMatrix<float> &result,
  *   between two images
  *
  *   \param unaryCostsCubeD Cube with unary costs
- *   \param leftImgAlignD Left image aligned
- *   \param rightImgAlignD Right image aligned
- *   \param xSize xSize of original left image2 
+ *   \param leftImgD Left image aligned
+ *   \param rightImgD Right image aligned
+ *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
- *   \param pitc2h Pitch size
  *
  *   \return None
  */
 /*======================================================================*/
 __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
-    Color* leftImg, Color* rightImg, int xSize, int ySize, int pitch)
+    Color* leftImg, Color* rightImg, int xSize, int ySize)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -762,13 +765,149 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
   unaryCostsCubeD[offset] = 0.0f;
 
   for (int i = 1; i <= MAX_DISPARITY; ++i) {
-    Color* imgL = (Color*)((char*) leftImg + y*pitch) + x;
-    Color* imgR = (Color*)((char*) rightImg + y*pitch) + x-i;
+
+    Color* imgL = (Color*)((char*) leftImg + y*xSize) + x;
+    Color* imgR = (Color*)((char*) rightImg + y*xSize) + x-i;
 
     int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
     unaryCostsCubeD[offset] = unaryEuclidean(*imgL, *imgR);
   }
 }
+
+
+/*======================================================================*/
+/*! 
+ *   Compute unary costs with L1-norm for pixel neighborhood
+ *
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param leftImgD Left image aligned
+ *   \param rightImgD Right image aligned
+ *   \param xSize xSize of original left image
+ *   \param ySize ySize of original left image 
+ *   \param N NxN neighborhood
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
+    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+
+  // Position of the thread in the unary costs cube array
+  int imgSize = xSize*ySize;
+  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
+  unaryCostsCubeD[offset] = 0.0f;
+
+  // Position of the pixel in the Left texture
+  float uL = (float) x/ (float) xSize;
+  float vL = (float) y/ (float) ySize;
+
+  int lim = static_cast<int>(N/2);
+
+  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+
+    float theta = 0.0f;
+    for (int j = -lim; j < lim; ++j) {
+      for (int k = -lim; k < lim; ++k) {
+        float uLkj = uL + (float) k/ (float) xSize;
+        float vLkj = vL + (float) j/ (float) ySize;
+        
+        float uRkj = uLkj - (float) i / (float) xSize;
+        float vRkj = vLkj;
+
+        // Read left and right texel, and round colors to integers
+        float4 texelL = tex2D(texLeft, uLkj, vLkj);
+        float4 texelR = tex2D(texRight, uRkj, vRkj);
+
+        Color colorL, colorR;
+        colorL.x = lroundf(texelL.x*255);
+        colorL.y = lroundf(texelL.y*255);
+        colorL.z = lroundf(texelL.z*255);
+
+        colorR.x = lroundf(texelR.x*255);
+        colorR.y = lroundf(texelR.y*255);
+        colorR.z = lroundf(texelR.z*255);
+
+        theta += unaryL1(colorL, colorR);
+      }
+    }
+
+    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
+    unaryCostsCubeD[offset] = theta;
+  }
+}
+
+
+/*======================================================================*/
+/*! 
+ *   Compute unary costs with L2-norm for pixel neighborhood
+ *
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param leftImgD Left image aligned
+ *   \param rightImgD Right image aligned
+ *   \param xSize xSize of original left image
+ *   \param ySize ySize of original left image 
+ *   \param N NxN neighborhood
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
+    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+
+  // Position of the thread in the unary costs cube array
+  int imgSize = xSize*ySize;
+  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
+  unaryCostsCubeD[offset] = 0.0f;
+
+  // Position of the pixel in the Left texture
+  float uL = (float) x/ (float) xSize;
+  float vL = (float) y/ (float) ySize;
+
+  int lim = static_cast<int>(N/2);
+
+  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+
+    float theta = 0.0f;
+    for (int j = -lim; j < lim; ++j) {
+      for (int k = -lim; k < lim; ++k) {
+        float uLkj = uL + (float) k/ (float) xSize;
+        float vLkj = vL + (float) j/ (float) ySize;
+        
+        float uRkj = uLkj - (float) i / (float) xSize;
+        float vRkj = vLkj;
+
+        // Read left and right texel, and round colors to integers
+        float4 texelL = tex2D(texLeft, uLkj, vLkj);
+        float4 texelR = tex2D(texRight, uRkj, vRkj);
+
+        Color colorL, colorR;
+        colorL.x = lroundf(texelL.x*255);
+        colorL.y = lroundf(texelL.y*255);
+        colorL.z = lroundf(texelL.z*255);
+
+        colorR.x = lroundf(texelR.x*255);
+        colorR.y = lroundf(texelR.y*255);
+        colorR.z = lroundf(texelR.z*255);
+
+        theta += unaryL2Squared(colorL, colorR);
+      }
+    }
+
+    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
+    unaryCostsCubeD[offset] = theta;
+  }
+}
+
 
 
 /*======================================================================*/
@@ -849,34 +988,47 @@ int main(int argc, char** argv)
    *-----------------------------------------------------------------------*/
   try {
     // Allocate matrices on the device
-    Color* leftImgAlignD;
-    Color* rightImgAlignD;
+    Color* leftImgD;
+    Color* rightImgD;
     float* resultD;
-    size_t pitch;
 
     // Allocate and copy memory of left, right and result from host to device
-    // Use Pitch for better memory coalesced accesses
-    cudaMallocPitch(&leftImgAlignD, &pitch, sizeof(Color)*leftImg.xSize(), leftImg.ySize());
+    cudaMalloc(&leftImgD, sizeof(Color)*leftImg.size());
     CHECK_CUDA_ERROR("Could not allocate device memory for left image");
-    cudaMemcpy2D((void*) leftImgAlignD, pitch, (void*) leftImg.data(),
-                 sizeof(float)*leftImg.xSize(), sizeof(float)*leftImg.xSize(),
+    cudaMemcpy2D((void*) leftImgD, sizeof(Color)*leftImg.xSize(), (void*) leftImg.data(),
+                 sizeof(Color)*leftImg.xSize(), sizeof(Color)*leftImg.xSize(),
                  leftImg.ySize(), cudaMemcpyHostToDevice);
     CHECK_CUDA_ERROR("Could not copy input left image from host to device");
-    std::cout << "Image row size " << sizeof(Color)*leftImg.xSize() << std::endl;
-    std::cout << "Image col size " << sizeof(Color)*leftImg.ySize() << std::endl;
-    std::cout << "Pitch          " << pitch << std::endl;
 
-    cudaMallocPitch(&rightImgAlignD, &pitch, sizeof(Color)*rightImg.xSize(), rightImg.ySize());
-    CHECK_CUDA_ERROR("Could not allocate device memory for right image");
-    cudaMemcpy2D((void*) rightImgAlignD, pitch, (void*) rightImg.data(),
-                 sizeof(float)*rightImg.xSize(), sizeof(float)*rightImg.xSize(),
+    cudaMalloc(&rightImgD, sizeof(Color)*rightImg.size());
+    CHECK_CUDA_ERROR("Could not allocate device memory for left image");
+    cudaMemcpy2D((void*) rightImgD, sizeof(Color)*rightImg.xSize(), (void*) rightImg.data(),
+                 sizeof(Color)*rightImg.xSize(), sizeof(Color)*rightImg.xSize(),
                  rightImg.ySize(), cudaMemcpyHostToDevice);
-    CHECK_CUDA_ERROR("Could not copy input left image from host to device");
+    CHECK_CUDA_ERROR("Could not copy input right image from host to device");
 
     cudaMalloc((void**) &resultD, sizeof(float)*leftImg.size());
     CHECK_CUDA_ERROR("Could not allocate device memory for result");
+
+    // Bind the memory to the Left and Right images Textures
+    cudaBindTexture2D( 0, texLeft, leftImgD, leftImg.xSize(), leftImg.ySize(), sizeof(Color)*leftImg.xSize());
+    CHECK_CUDA_ERROR("Could not bind the left image to the texture");
+
+    cudaBindTexture2D( 0, texRight, rightImgD, rightImg.xSize(), rightImg.ySize(), sizeof(Color)*rightImg.xSize());
+    CHECK_CUDA_ERROR("Could not bind the right image to the texture");
     
-    // Allocate and memory for a unary costs Cube array in the device
+    // Setup texture parameters 
+    texLeft.filterMode = cudaFilterModePoint;
+    texLeft.addressMode[0] = cudaAddressModeClamp;
+    texLeft.addressMode[1] = cudaAddressModeClamp;
+    texLeft.normalized = true;
+    
+    texRight.filterMode = cudaFilterModePoint;
+    texRight.addressMode[0] = cudaAddressModeClamp;
+    texRight.addressMode[1] = cudaAddressModeClamp;
+    texRight.normalized = true;
+
+    // Allocate for a unary costs Cube array in the device
     float* unaryCostsCubeD;
     cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
     CHECK_CUDA_ERROR("Could not allocate device memory for unary costs cube");
@@ -890,9 +1042,21 @@ int main(int argc, char** argv)
       Unitary Costs Kernels 
      ***************************/
     timer::start("SGM (GPU)");
-    unaryCostEuclideanKernel<<<grid, block>>>(unaryCostsCubeD, leftImgAlignD, rightImgAlignD,
-                                              leftImg.xSize(), rightImg.ySize(), pitch);
+    if (unaryCostOption == 1) {
+      unaryCostEuclideanKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
+                                              leftImg.xSize(), leftImg.ySize());
+    }
+    if (unaryCostOption == 2) {
+      unaryCostL1NormKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
+                                          leftImg.xSize(), leftImg.ySize(), N);
+    }
+    if (unaryCostOption == 3) {
+      unaryCostL2NormKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
+                                          leftImg.xSize(), leftImg.ySize(), N);
+    }
+
     cudaDeviceSynchronize(); // forces buffer flush
+
 
     /**************************
       Message Passing Kernerls 
@@ -903,7 +1067,7 @@ int main(int argc, char** argv)
 
     // Copy resulting disparity map from device to host
     cudaMemcpy2D((void*)result.data(), sizeof(float)*leftImg.xSize(),
-                 (void*)resultD, pitch, sizeof(float)*leftImg.xSize(), leftImg.ySize(),
+                 (void*)resultD, sizeof(float)*leftImg.xSize(), sizeof(float)*leftImg.xSize(), leftImg.ySize(),
                  cudaMemcpyDeviceToHost);
     CHECK_CUDA_ERROR("Could not copy the result from device to host");
 
