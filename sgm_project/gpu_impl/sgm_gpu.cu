@@ -191,15 +191,15 @@ inline float unaryLxNeighbor(CMatrix<Color> const &leftImg,
 
 /*======================================================================*/
 /*! 
-   *   Compute Average pixel of NxN neighborhood 
-    *
-     *   \param Img       Image
-      *   \param x         x position of image pixel
-       *   \param y         y position of image pixel
-        *   \param N         NxN neighborhood
-         *
-          *   \return average pixel Color for the neighborhood
-           */
+ *   Compute Average pixel of NxN neighborhood 
+ *
+ *   \param Img       Image
+ *   \param x         x position of image pixel
+ *   \param y         y position of image pixel
+ *   \param N         NxN neighborhood
+ *
+ *   \return average pixel Color for the neighborhood
+ */
 /*======================================================================*/
 inline Color averagePixel(CMatrix<Color> const &Img,
                               int x, int y, int N)
@@ -267,7 +267,6 @@ __device__ inline Color averagePixelDevice(bool LR, float u, float v,
       averagePixelX += static_cast<float>(lroundf(texel.x*255));
       averagePixelY += static_cast<float>(lroundf(texel.y*255));
       averagePixelX += static_cast<float>(lroundf(texel.z*255));
-
     }
   }
 
@@ -380,7 +379,7 @@ inline float unaryNCCNeighbor(CMatrix<Color> const &leftImg,
  *   \return 0 if equal, 1 otherwise
  */
 /*======================================================================*/
-inline float thetapq(int a, int b)
+__host__ __device__ inline float thetapq(int a, int b)
 {
   return (a == b) ? 0.0f : 1.0f;
 }
@@ -1037,6 +1036,102 @@ __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
 
 /*======================================================================*/
 /*! 
+ *   Compute message passing in Horizontal Forward pass
+ *
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param MqsHFCubeD Cube with message passing costs
+ *   \param xSize xSize of original left image 
+ *   \param ySize ySize of original left image 
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
+                           int xSize, int ySize)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+
+  // Loop along the rows to propagate the horizontal message passing
+  int imgSize = xSize*ySize;
+  for (int j = 0; j <= MAX_DISPARITY; ++j) {
+    // Offset in message passing cube array
+    int offsetMP = 0 + y*gridDim.x*blockDim.x + j*imgSize;
+    MqsHFCubeD[offsetMP] = 0.0f;
+  }
+
+  for (int x = 1; x < xSize; ++x) {
+    for (int j = 0; j <= MAX_DISPARITY; ++j) {
+      int offsetMP = x + y*gridDim.x*blockDim.x + j*imgSize;
+      // Offset in unary costs cube array
+      int offsetUC = x-1 + y*gridDim.x*blockDim.x + j*imgSize;
+      MqsHFCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
+                             LAMBDA * thetapq(0, j);
+      for (int i = 1; i <= MAX_DISPARITY; ++i) {
+        int offsetUC = x-1 + y*gridDim.x*blockDim.x + i*imgSize; 
+        float cost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
+                             LAMBDA * thetapq(i, j);
+        if (cost < MqsHFCubeD[offsetMP]) {
+          MqsHFCubeD[offsetMP] = cost;
+        }
+      }
+    }
+  }
+}
+
+
+/*======================================================================*/
+/*! 
+ *   Compute message passing in Horizontal Backward pass
+ *
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param MqsHBCubeD Cube with message passing costs
+ *   \param xSize xSize of original left image 
+ *   \param ySize ySize of original left image 
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
+                           int xSize, int ySize)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+
+  // Loop along the rows to propagate the horizontal message passing
+  int imgSize = xSize*ySize;
+  for (int j = 0; j <= MAX_DISPARITY; ++j) {
+    // Offset in message passing cube array
+    int offsetMP = xSize-1 + y*gridDim.x*blockDim.x + j*imgSize;
+    MqsHBCubeD[offsetMP] = 0.0f;
+  }
+
+  for (int x = xSize-2; x >= 0; --x) {
+    for (int j = 0; j <= MAX_DISPARITY; ++j) {
+      int offsetMP = x + y*gridDim.x*blockDim.x + j*imgSize;
+      // Offset in unary costs cube array
+      int offsetUC = x+1 + y*gridDim.x*blockDim.x + j*imgSize;
+      MqsHBCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
+                             LAMBDA * thetapq(0, j);
+      for (int i = 1; i <= MAX_DISPARITY; ++i) {
+        int offsetUC = x+1 + y*gridDim.x*blockDim.x + i*imgSize; 
+        float cost = unaryCostsCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
+                             LAMBDA * thetapq(i, j);
+        if (cost < MqsHBCubeD[offsetMP]) {
+          MqsHBCubeD[offsetMP] = cost;
+        }
+      }
+    }
+  }
+}
+
+
+/*======================================================================*/
+/*! 
  *   Main Function
  */
 /*======================================================================*/
@@ -1112,6 +1207,7 @@ int main(int argc, char** argv)
    * Compute Semi-Global Matching on the GPU
    *-----------------------------------------------------------------------*/
   try {
+    /*************** Unary Costs Computation *******************************/
     // Allocate matrices on the device
     Color* leftImgD;
     Color* rightImgD;
@@ -1153,46 +1249,78 @@ int main(int argc, char** argv)
     texRight.addressMode[1] = cudaAddressModeClamp;
     texRight.normalized = true;
 
-    // Allocate for a unary costs Cube array in the device
+    // Allocate memory for a unary costs Cube array in the device
     float* unaryCostsCubeD;
     cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
     CHECK_CUDA_ERROR("Could not allocate device memory for unary costs cube");
 
-    // Define Kernel blocks and Grid of blocks
-    dim3 block(BLOCK_DIM, BLOCK_DIM, 1);
-    dim3 grid(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
-              std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+    // Define Kernel blocks and Grid of blocks for unary costs
+    dim3 blockUC(BLOCK_DIM, BLOCK_DIM, 1);
+    dim3 gridUC(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
+                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
 
     /***************************
       Unitary Costs Kernels 
      ***************************/
     timer::start("SGM (GPU)");
     if (unaryCostOption == 1) {
-      unaryCostEuclideanKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
-                                              leftImg.xSize(), leftImg.ySize());
+      unaryCostEuclideanKernel<<<gridUC, blockUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
+                                                    leftImg.xSize(), leftImg.ySize());
     }
     if (unaryCostOption == 2) {
-      unaryCostL1NormKernel<<<grid, block>>>(unaryCostsCubeD,
-                                             leftImg.xSize(), leftImg.ySize(), N);
+      unaryCostL1NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+                                                 leftImg.xSize(), leftImg.ySize(), N);
     }
     if (unaryCostOption == 3) {
-      unaryCostL2NormKernel<<<grid, block>>>(unaryCostsCubeD,
-                                             leftImg.xSize(), leftImg.ySize(), N);
+      unaryCostL2NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+                                                 leftImg.xSize(), leftImg.ySize(), N);
     }
     if (unaryCostOption == 4) {
-      unaryCostNCCKernel<<<grid, block>>>(unaryCostsCubeD,
-                                          leftImg.xSize(), leftImg.ySize(), N);
+      unaryCostNCCKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+                                              leftImg.xSize(), leftImg.ySize(), N);
     }
 
-    cudaDeviceSynchronize(); // forces buffer flush
+    cudaDeviceSynchronize(); 
+    CHECK_CUDA_ERROR("Unitary Costs Kernels task has failed");
+
+    
+    /*************** Message Passing Computation *******************************/
+    // Horizontal Message Passing
+    // Allocate memory for a message passing Cube array in the device
+    float* MqsHFCubeD; // Horizontal Forward
+    cudaMalloc((void**)&MqsHFCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
+    CHECK_CUDA_ERROR("Could not allocate device memory for horizontal forward cube");
+
+    float* MqsHBCubeD; // Horizontal Backward
+    cudaMalloc((void**)&MqsHBCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
+    CHECK_CUDA_ERROR("Could not allocate device memory for horizontal backward cube");
 
     /**************************
       Message Passing Kernerls 
      **************************/
+    // Define Kernel blocks and Grid of blocks for message passing
+    dim3 blockMP(1, BLOCK_DIM, 1);
+    dim3 gridMP(1, std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+    
+    // Create streams to run the message passing kernels in parallel
+    cudaStream_t stream1, stream2;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+
+    // Message passing horizontal forward kernel
+    MPHFKernel<<<gridMP, blockMP, 0, stream1>>>(unaryCostsCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
+
+    // Message passing horizontal backward kernel
+    MPHBKernel<<<gridMP, blockMP, 0, stream2>>>(unaryCostsCubeD, MqsHBCubeD, leftImg.xSize(), leftImg.ySize());
+
+    cudaDeviceSynchronize(); // forces buffer flush
+    CHECK_CUDA_ERROR("Some message passing task has failed");
 
     timer::stop("SGM (GPU)");
     timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
+
+    /*************** Decision Computation *******************************/
     // Copy resulting disparity map from device to host
     cudaMemcpy2D((void*)result.data(), sizeof(float)*leftImg.xSize(),
                  (void*)resultD, sizeof(float)*leftImg.xSize(), sizeof(float)*leftImg.xSize(), leftImg.ySize(),
