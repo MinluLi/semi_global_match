@@ -188,20 +188,21 @@ inline float unaryLxNeighbor(CMatrix<Color> const &leftImg,
 }
 
 
+
 /*======================================================================*/
 /*! 
- *   Compute Average pixel of NxN neighborhood 
- *
- *   \param Img       Image
- *   \param x         x position of image pixel
- *   \param y         y position of image pixel
- *   \param N         NxN neighborhood
- *
- *   \return average pixel Color for the neighborhood
- */
+   *   Compute Average pixel of NxN neighborhood 
+    *
+     *   \param Img       Image
+      *   \param x         x position of image pixel
+       *   \param y         y position of image pixel
+        *   \param N         NxN neighborhood
+         *
+          *   \return average pixel Color for the neighborhood
+           */
 /*======================================================================*/
 inline Color averagePixel(CMatrix<Color> const &Img,
-                          int x, int y, int N)
+                              int x, int y, int N)
 {
   Color averagePixel;
   float averagePixelX = 0.0f;
@@ -231,6 +232,54 @@ inline Color averagePixel(CMatrix<Color> const &Img,
 
 /*======================================================================*/
 /*! 
+ *   Compute Average pixel of NxN neighborhood 
+ *
+ *   \param LR        Bool value for left or right Texture
+ *   \param u         u position in the texture
+ *   \param v         v position in the texture
+ *   \param xSize     xSize of image 
+ *   \param ySize     ySize of image 
+ *   \param N         NxN neighborhood
+ *
+ *   \return average pixel Color for the neighborhood
+ */
+/*======================================================================*/
+__device__ inline Color averagePixelDevice(bool LR, float u, float v,
+                                    int xSize, int ySize, int N)
+{
+  Color averagePixel;
+  float averagePixelX = 0.0f;
+  float averagePixelY = 0.0f;
+  float averagePixelZ = 0.0f;
+
+  int lim = static_cast<int>(N/2);
+  for (int j = -lim; j < lim; ++j) {
+    for (int k = -lim; k < lim; ++k) {
+      float ukj = u + (float) k/ (float) xSize;
+      float vkj = v + (float) j/ (float) ySize;
+      
+      // Read left OR right texel, and round colors to integers
+      float4 texel = tex2D(texLeft, ukj, vkj);
+      if (LR == 0) {
+        float4 texel = tex2D(texRight, ukj, vkj);
+      }
+
+      averagePixelX += static_cast<float>(lroundf(texel.x*255));
+      averagePixelY += static_cast<float>(lroundf(texel.y*255));
+      averagePixelX += static_cast<float>(lroundf(texel.z*255));
+
+    }
+  }
+
+  averagePixel.x = averagePixelX/(N*N);
+  averagePixel.y = averagePixelY/(N*N);
+  averagePixel.z = averagePixelZ/(N*N);
+  return averagePixel;
+}
+
+
+/*======================================================================*/
+/*! 
  *   Compute difference of given pixels.
  *
  *   \param a The first pixel
@@ -239,7 +288,7 @@ inline Color averagePixel(CMatrix<Color> const &Img,
  *   \return difference in Colors of a and b
  */
 /*======================================================================*/
-inline float4 pixelDifference(Color const &a, Color const &b)
+__host__ __device__ inline float4 pixelDifference(Color const &a, Color const &b)
 {
   float4 pixelDifference;
   pixelDifference.x = static_cast<float>(a.x) - static_cast<float>(b.x);
@@ -259,7 +308,7 @@ inline float4 pixelDifference(Color const &a, Color const &b)
  *   \return dot product of a and b
  */
 /*======================================================================*/
-inline float pixelDotProd(float4 const &a, float4 const &b)
+__host__ __device__ inline float pixelDotProd(float4 const &a, float4 const &b)
 {
   return a.x * b.x +
          a.y * b.y +
@@ -909,6 +958,88 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
 }
 
 
+/*======================================================================*/
+/*! 
+ *   Compute Normalized cross-correlation (NCC) 
+ *
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param leftImgD Left image aligned
+ *   \param rightImgD Right image aligned
+ *   \param xSize xSize of original left image
+ *   \param ySize ySize of original left image 
+ *   \param N NxN neighborhood
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
+    Color* leftImg, Color* rightImg, int xSize, int ySize, int N)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+
+  // Position of the thread in the unary costs cube array
+  int imgSize = xSize*ySize;
+  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
+  unaryCostsCubeD[offset] = 0.0f;
+
+  // Position of the pixel in the Left texture
+  float uL = (float) x/ (float) xSize;
+  float vL = (float) y/ (float) ySize;
+
+  int lim = static_cast<int>(N/2);
+
+  // Compute average pixel of left image around NxN
+  Color averagePixelLeftImg = averagePixelDevice(1, uL, vL, xSize, ySize, N);
+  float varLeftImg = 0.0f;
+
+  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+    // Compute average pixel of right image around NxN
+    Color averagePixelRightImg = averagePixelDevice(0, uL-(float)i/(float)xSize, vL,
+                                                    xSize, ySize, N);
+    float varRightImg = 0.0f;
+
+    float theta = 0.0f;
+    for (int j = -lim; j < lim; ++j) {
+      for (int k = -lim; k < lim; ++k) {
+        float uLkj = uL + (float) k/ (float) xSize;
+        float vLkj = vL + (float) j/ (float) ySize;
+        
+        float uRkj = uLkj - (float)i/(float)xSize;
+        float vRkj = vLkj;
+
+        // Read left and right texel, and round colors to integers
+        float4 texelL = tex2D(texLeft, uLkj, vLkj);
+        float4 texelR = tex2D(texRight, uRkj, vRkj);
+
+        Color colorL, colorR;
+        colorL.x = lroundf(texelL.x*255);
+        colorL.y = lroundf(texelL.y*255);
+        colorL.z = lroundf(texelL.z*255);
+
+        colorR.x = lroundf(texelR.x*255);
+        colorR.y = lroundf(texelR.y*255);
+        colorR.z = lroundf(texelR.z*255);
+
+        theta += pixelDotProd(
+                  pixelDifference(colorL, averagePixelLeftImg),            
+                  pixelDifference(colorR, averagePixelRightImg));
+        // Variance of left Image
+        varLeftImg += unaryL2Squared(colorL, averagePixelLeftImg);
+        // Variance of right Image
+        varRightImg += unaryL2Squared(colorR, averagePixelRightImg);
+ 
+
+      }
+    }
+
+    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
+    unaryCostsCubeD[offset] = theta/std::sqrt(varLeftImg*varRightImg);
+  }
+}
+
 
 /*======================================================================*/
 /*! 
@@ -1054,9 +1185,12 @@ int main(int argc, char** argv)
       unaryCostL2NormKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
                                           leftImg.xSize(), leftImg.ySize(), N);
     }
+    if (unaryCostOption == 4) {
+      unaryCostNCCKernel<<<grid, block>>>(unaryCostsCubeD, leftImgD, rightImgD,
+                                          leftImg.xSize(), leftImg.ySize(), N);
+    }
 
     cudaDeviceSynchronize(); // forces buffer flush
-
 
     /**************************
       Message Passing Kernerls 
