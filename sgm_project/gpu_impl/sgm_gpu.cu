@@ -56,7 +56,7 @@ typedef uchar4 Color;
 /*-------------------------------------------------------------------------
  *  Regularization weight
  *-------------------------------------------------------------------------*/
-static float const LAMBDA = 50.0f;
+static float const LAMBDA = 100.0f;
 
 /*-------------------------------------------------------------------------
  *  Maximum disparity (number of labels in the message passing algorithm)
@@ -1132,6 +1132,52 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
 
 /*======================================================================*/
 /*! 
+ *   Compute decision of all incoming HORIZONTAL messages to every pixel
+ *
+ *   \param resultD Image with resulting disparity
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param MqsHFCubeD Cube with message passing costs
+ *   \param MqsHBCubeD Cube with message passing costs
+ *   \param xSize xSize of original left image 
+ *   \param ySize ySize of original left image 
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void decisionHKernel(float* resultD, float* unaryCostsCubeD,
+                float* MqsHFCubeD, float* MqsHBCubeD, int xSize, int ySize)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+  
+  int imgSize = xSize*ySize; 
+  int offsetUC = x + y*gridDim.x*blockDim.x + 0*imgSize;
+
+  float minCost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
+                  MqsHBCubeD[offsetUC];
+  int minIndex = 0;
+
+  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+    offsetUC = x + y*gridDim.x*blockDim.x + i*imgSize;
+
+    float cost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
+                 MqsHBCubeD[offsetUC];
+
+    if(cost < minCost) {
+      minCost = cost;
+      minIndex = i;
+    }
+  }
+
+  int offset = x + y*xSize;
+  resultD[offset] = minIndex;
+}
+
+
+/*======================================================================*/
+/*! 
  *   Main Function
  */
 /*======================================================================*/
@@ -1321,6 +1367,14 @@ int main(int argc, char** argv)
 
 
     /*************** Decision Computation *******************************/
+    dim3 blockDec(BLOCK_DIM, BLOCK_DIM, 1);
+    dim3 gridDec(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
+                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+
+    // Decision kernel
+    decisionHKernel<<<gridDec, blockDec>>>(resultD, unaryCostsCubeD,
+                        MqsHBCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
+
     // Copy resulting disparity map from device to host
     cudaMemcpy2D((void*)result.data(), sizeof(float)*leftImg.xSize(),
                  (void*)resultD, sizeof(float)*leftImg.xSize(), sizeof(float)*leftImg.xSize(), leftImg.ySize(),
@@ -1333,7 +1387,6 @@ int main(int argc, char** argv)
   }
 
 
-#if 0
   /*---------------------------------------------------------------------
    *  Write results to output file 
    *  Format: [imgNumber]-[unaryCostOption]-[msgPassingOption]-gt.float3
@@ -1396,7 +1449,6 @@ int main(int argc, char** argv)
     std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
     return 1;
   }
-#endif
 
   return 0;
 }
