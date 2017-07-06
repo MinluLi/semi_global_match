@@ -13,7 +13,10 @@
 #include <stdlib.h>
 
 // Block dimension of CUDA kernels
-#define BLOCK_DIM 16
+#define BLOCK_DIM 32
+
+// NxN Patch size
+static const int N_PATCH = 7;
 
 // Image Textures
 texture<uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> texLeft;
@@ -239,30 +242,30 @@ inline Color averagePixel(CMatrix<Color> const &Img,
  *   \param v         v position in the texture
  *   \param xSize     xSize of image 
  *   \param ySize     ySize of image 
- *   \param N         NxN neighborhood
  *
  *   \return average pixel Color for the neighborhood
  */
 /*======================================================================*/
 __device__ inline Color averagePixelDevice(bool LR, float u, float v,
-                                    int xSize, int ySize, int N)
+                                    int xSize, int ySize)
 {
   Color averagePixel;
   float averagePixelX = 0.0f;
   float averagePixelY = 0.0f;
   float averagePixelZ = 0.0f;
 
-  int lim = static_cast<int>(N/2);
+  int lim = static_cast<int>(N_PATCH/2);
   for (int j = -lim; j < lim; ++j) {
     for (int k = -lim; k < lim; ++k) {
       float ukj = u + (float) k/ (float) xSize;
       float vkj = v + (float) j/ (float) ySize;
       
       // Read left OR right texel, and round colors to integers
-      float4 texel = tex2D(texLeft, ukj, vkj);
-      if (LR == 0) {
-        float4 texel = tex2D(texRight, ukj, vkj);
-      }
+      float4 texel;
+      if (LR == 1)
+        texel = tex2D(texLeft, ukj, vkj);
+      else 
+        texel = tex2D(texRight, ukj, vkj);
 
       averagePixelX += static_cast<float>(lroundf(texel.x*255));
       averagePixelY += static_cast<float>(lroundf(texel.y*255));
@@ -270,9 +273,9 @@ __device__ inline Color averagePixelDevice(bool LR, float u, float v,
     }
   }
 
-  averagePixel.x = averagePixelX/(N*N);
-  averagePixel.y = averagePixelY/(N*N);
-  averagePixel.z = averagePixelZ/(N*N);
+  averagePixel.x = averagePixelX/(N_PATCH*N_PATCH);
+  averagePixel.y = averagePixelY/(N_PATCH*N_PATCH);
+  averagePixel.z = averagePixelZ/(N_PATCH*N_PATCH);
   return averagePixel;
 }
 
@@ -804,22 +807,18 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
   // Position of the thread in the unary costs cube array
-  int imgSize = xSize*ySize; 
-  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
-  unaryCostsCubeD[offset] = 0.0f;
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
+  // Left and Right image pixel
+  Color* imgL = (Color*)((char*) leftImg + y*xSize) + x;
+  Color* imgR = (Color*)((char*) rightImg + y*xSize) + x-d;
 
-  for (int i = 1; i <= MAX_DISPARITY; ++i) {
-
-    Color* imgL = (Color*)((char*) leftImg + y*xSize) + x;
-    Color* imgR = (Color*)((char*) rightImg + y*xSize) + x-i;
-
-    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
-    unaryCostsCubeD[offset] = unaryEuclidean(*imgL, *imgR);
-  }
+  unaryCostsCubeD[offset] = unaryEuclidean(*imgL, *imgR);
 }
 
 
@@ -830,61 +829,56 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
  *   \param unaryCostsCubeD Cube with unary costs
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
- *   \param N NxN neighborhood
  *
  *   \return None
  */
 /*======================================================================*/
 __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
-    int xSize, int ySize, int N)
+    int xSize, int ySize)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
   // Position of the thread in the unary costs cube array
-  int imgSize = xSize*ySize;
-  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
-  unaryCostsCubeD[offset] = 0.0f;
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
 
   // Position of the pixel in the Left texture
   float uL = (float) x/ (float) xSize;
   float vL = (float) y/ (float) ySize;
 
-  int lim = static_cast<int>(N/2);
+  int lim = static_cast<int>(N_PATCH/2);
 
-  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+  float theta = 0.0f;
+  for (int j = -lim; j < lim; ++j) {
+    for (int k = -lim; k < lim; ++k) {
+      float uLkj = uL + (float) k/ (float) xSize;
+      float vLkj = vL + (float) j/ (float) ySize;
+      
+      float uRkj = uLkj - (float) d / (float) xSize;
+      float vRkj = vLkj;
 
-    float theta = 0.0f;
-    for (int j = -lim; j < lim; ++j) {
-      for (int k = -lim; k < lim; ++k) {
-        float uLkj = uL + (float) k/ (float) xSize;
-        float vLkj = vL + (float) j/ (float) ySize;
-        
-        float uRkj = uLkj - (float) i / (float) xSize;
-        float vRkj = vLkj;
+      // Read left and right texel, and round colors to integers
+      float4 texelL = tex2D(texLeft, uLkj, vLkj);
+      float4 texelR = tex2D(texRight, uRkj, vRkj);
 
-        // Read left and right texel, and round colors to integers
-        float4 texelL = tex2D(texLeft, uLkj, vLkj);
-        float4 texelR = tex2D(texRight, uRkj, vRkj);
+      Color colorL, colorR;
+      colorL.x = lroundf(texelL.x*255);
+      colorL.y = lroundf(texelL.y*255);
+      colorL.z = lroundf(texelL.z*255);
 
-        Color colorL, colorR;
-        colorL.x = lroundf(texelL.x*255);
-        colorL.y = lroundf(texelL.y*255);
-        colorL.z = lroundf(texelL.z*255);
+      colorR.x = lroundf(texelR.x*255);
+      colorR.y = lroundf(texelR.y*255);
+      colorR.z = lroundf(texelR.z*255);
 
-        colorR.x = lroundf(texelR.x*255);
-        colorR.y = lroundf(texelR.y*255);
-        colorR.z = lroundf(texelR.z*255);
-
-        theta += unaryL1(colorL, colorR);
-      }
+      theta += unaryL1(colorL, colorR);
     }
-
-    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
-    unaryCostsCubeD[offset] = theta;
   }
+
+  unaryCostsCubeD[offset] = theta;
 }
 
 
@@ -895,61 +889,56 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
  *   \param unaryCostsCubeD Cube with unary costs
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
- *   \param N NxN neighborhood
  *
  *   \return None
  */
 /*======================================================================*/
 __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
-    int xSize, int ySize, int N)
+    int xSize, int ySize)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
   // Position of the thread in the unary costs cube array
-  int imgSize = xSize*ySize;
-  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
-  unaryCostsCubeD[offset] = 0.0f;
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
 
   // Position of the pixel in the Left texture
   float uL = (float) x/ (float) xSize;
   float vL = (float) y/ (float) ySize;
 
-  int lim = static_cast<int>(N/2);
+  int lim = static_cast<int>(N_PATCH/2);
 
-  for (int i = 1; i <= MAX_DISPARITY; ++i) {
+  float theta = 0.0f;
+  for (int j = -lim; j < lim; ++j) {
+    for (int k = -lim; k < lim; ++k) {
+      float uLkj = uL + (float) k/ (float) xSize;
+      float vLkj = vL + (float) j/ (float) ySize;
+      
+      float uRkj = uLkj - (float) d / (float) xSize;
+      float vRkj = vLkj;
 
-    float theta = 0.0f;
-    for (int j = -lim; j < lim; ++j) {
-      for (int k = -lim; k < lim; ++k) {
-        float uLkj = uL + (float) k/ (float) xSize;
-        float vLkj = vL + (float) j/ (float) ySize;
-        
-        float uRkj = uLkj - (float) i / (float) xSize;
-        float vRkj = vLkj;
+      // Read left and right texel, and round colors to integers
+      float4 texelL = tex2D(texLeft, uLkj, vLkj);
+      float4 texelR = tex2D(texRight, uRkj, vRkj);
 
-        // Read left and right texel, and round colors to integers
-        float4 texelL = tex2D(texLeft, uLkj, vLkj);
-        float4 texelR = tex2D(texRight, uRkj, vRkj);
+      Color colorL, colorR;
+      colorL.x = lroundf(texelL.x*255);
+      colorL.y = lroundf(texelL.y*255);
+      colorL.z = lroundf(texelL.z*255);
 
-        Color colorL, colorR;
-        colorL.x = lroundf(texelL.x*255);
-        colorL.y = lroundf(texelL.y*255);
-        colorL.z = lroundf(texelL.z*255);
+      colorR.x = lroundf(texelR.x*255);
+      colorR.y = lroundf(texelR.y*255);
+      colorR.z = lroundf(texelR.z*255);
 
-        colorR.x = lroundf(texelR.x*255);
-        colorR.y = lroundf(texelR.y*255);
-        colorR.z = lroundf(texelR.z*255);
-
-        theta += unaryL2Squared(colorL, colorR);
-      }
+      theta += unaryL2Squared(colorL, colorR);
     }
-
-    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
-    unaryCostsCubeD[offset] = theta;
   }
+
+  unaryCostsCubeD[offset] = theta;
 }
 
 
@@ -960,77 +949,68 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
  *   \param unaryCostsCubeD Cube with unary costs
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
- *   \param N NxN neighborhood
  *
  *   \return None
  */
 /*======================================================================*/
 __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
-    int xSize, int ySize, int N)
+    int xSize, int ySize)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
   // Position of the thread in the unary costs cube array
-  int imgSize = xSize*ySize;
-  int offset = x + y*gridDim.x*blockDim.x + 0*imgSize;
-  unaryCostsCubeD[offset] = 0.0f;
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
 
   // Position of the pixel in the Left texture
   float uL = (float) x/ (float) xSize;
   float vL = (float) y/ (float) ySize;
-
-  int lim = static_cast<int>(N/2);
-
-  // Compute average pixel of left image around NxN
-  Color averagePixelLeftImg = averagePixelDevice(1, uL, vL, xSize, ySize, N);
+  
+  // Compute average pixel of left and right image around NxN
+  Color averagePixelLeftImg = averagePixelDevice(1, uL, vL, xSize, ySize);
   float varLeftImg = 0.0f;
+  Color averagePixelRightImg = averagePixelDevice(0, uL-(float)d/(float)xSize, vL,
+                                                    xSize, ySize);
+  float varRightImg = 0.0f;
 
-  for (int i = 1; i <= MAX_DISPARITY; ++i) {
-    // Compute average pixel of right image around NxN
-    Color averagePixelRightImg = averagePixelDevice(0, uL-(float)i/(float)xSize, vL,
-                                                    xSize, ySize, N);
-    float varRightImg = 0.0f;
+  float theta = 0.0f;
+  int lim = static_cast<int>(N_PATCH/2);
+  for (int j = -lim; j < lim; ++j) {
+    for (int k = -lim; k < lim; ++k) {
+      float uLkj = uL + (float) k/ (float) xSize;
+      float vLkj = vL + (float) j/ (float) ySize;
+      
+      float uRkj = uLkj - (float) d / (float) xSize;
+      float vRkj = vLkj;
 
-    float theta = 0.0f;
-    for (int j = -lim; j < lim; ++j) {
-      for (int k = -lim; k < lim; ++k) {
-        float uLkj = uL + (float) k/ (float) xSize;
-        float vLkj = vL + (float) j/ (float) ySize;
-        
-        float uRkj = uLkj - (float)i/(float)xSize;
-        float vRkj = vLkj;
+      // Read left and right texel, and round colors to integers
+      float4 texelL = tex2D(texLeft, uLkj, vLkj);
+      float4 texelR = tex2D(texRight, uRkj, vRkj);
 
-        // Read left and right texel, and round colors to integers
-        float4 texelL = tex2D(texLeft, uLkj, vLkj);
-        float4 texelR = tex2D(texRight, uRkj, vRkj);
+      Color colorL, colorR;
+      colorL.x = lroundf(texelL.x*255);
+      colorL.y = lroundf(texelL.y*255);
+      colorL.z = lroundf(texelL.z*255);
 
-        Color colorL, colorR;
-        colorL.x = lroundf(texelL.x*255);
-        colorL.y = lroundf(texelL.y*255);
-        colorL.z = lroundf(texelL.z*255);
+      colorR.x = lroundf(texelR.x*255);
+      colorR.y = lroundf(texelR.y*255);
+      colorR.z = lroundf(texelR.z*255);
 
-        colorR.x = lroundf(texelR.x*255);
-        colorR.y = lroundf(texelR.y*255);
-        colorR.z = lroundf(texelR.z*255);
-
-        theta += pixelDotProd(
-                  pixelDifference(colorL, averagePixelLeftImg),            
-                  pixelDifference(colorR, averagePixelRightImg));
-        // Variance of left Image
-        varLeftImg += unaryL2Squared(colorL, averagePixelLeftImg);
-        // Variance of right Image
-        varRightImg += unaryL2Squared(colorR, averagePixelRightImg);
- 
-
-      }
+      theta += pixelDotProd(
+                pixelDifference(colorL, averagePixelLeftImg),            
+                pixelDifference(colorR, averagePixelRightImg));
+      // Variance of left Image
+      varLeftImg += unaryL2Squared(colorL, averagePixelLeftImg);
+      // Variance of right Image
+      varRightImg += unaryL2Squared(colorR, averagePixelRightImg);
     }
-
-    int offset = x + y*gridDim.x*blockDim.x + i*imgSize;
-    unaryCostsCubeD[offset] = theta/std::sqrt(varLeftImg*varRightImg);
   }
+
+  unaryCostsCubeD[offset] = theta/std::sqrt(varLeftImg*varRightImg);
 }
 
 
@@ -1051,31 +1031,28 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
-  // Loop along the rows to propagate the horizontal message passing
-  int imgSize = xSize*ySize;
-  for (int j = 0; j <= MAX_DISPARITY; ++j) {
-    // Offset in message passing cube array
-    int offsetMP = 0 + y*gridDim.x*blockDim.x + j*imgSize;
-    MqsHFCubeD[offsetMP] = 0.0f;
-  }
+  // Position of the thread in the message passing cube array
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offsetMP = d + 0*(MAX_DISPARITY+1) + y*xdSize;
+  
+  MqsHFCubeD[offsetMP] = 0.0f;
 
-  for (int x = 1; x < xSize; ++x) {
-    for (int j = 0; j <= MAX_DISPARITY; ++j) {
-      int offsetMP = x + y*gridDim.x*blockDim.x + j*imgSize;
-      // Offset in unary costs cube array
-      int offsetUC = x-1 + y*gridDim.x*blockDim.x + j*imgSize;
-      MqsHFCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
-                             LAMBDA * thetapq(0, j);
-      for (int i = 1; i <= MAX_DISPARITY; ++i) {
-        int offsetUC = x-1 + y*gridDim.x*blockDim.x + i*imgSize; 
-        float cost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
-                             LAMBDA * thetapq(i, j);
-        if (cost < MqsHFCubeD[offsetMP]) {
-          MqsHFCubeD[offsetMP] = cost;
-        }
+  // Loop along the rows to propagate the horizontal message passing
+  for (int col = 1; col < xSize; ++col) {
+    offsetMP += MAX_DISPARITY+1;
+    int offsetUC = d + (col-1)*(MAX_DISPARITY+1) + y*xdSize;
+    MqsHFCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] + 
+                           LAMBDA * thetapq(0, d);
+    
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
+      float cost = unaryCostsCubeD[offsetUC+j] + MqsHFCubeD[offsetUC+j] +
+                   LAMBDA * thetapq(j, d);
+      if (cost < MqsHFCubeD[offsetMP]) {
+        MqsHFCubeD[offsetMP] = cost;
       }
     }
   }
@@ -1099,31 +1076,28 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = blockDim.z * blockIdx.z + threadIdx.z;
   if( x >= xSize || y >= ySize )
     return;
 
-  // Loop along the rows to propagate the horizontal message passing
-  int imgSize = xSize*ySize;
-  for (int j = 0; j <= MAX_DISPARITY; ++j) {
-    // Offset in message passing cube array
-    int offsetMP = xSize-1 + y*gridDim.x*blockDim.x + j*imgSize;
-    MqsHBCubeD[offsetMP] = 0.0f;
-  }
+  // Position of the thread in the message passing cube array
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offsetMP = d + (xSize-1)*(MAX_DISPARITY+1) + y*xdSize;
+  
+  MqsHBCubeD[offsetMP] = 0.0f;
 
-  for (int x = xSize-2; x >= 0; --x) {
-    for (int j = 0; j <= MAX_DISPARITY; ++j) {
-      int offsetMP = x + y*gridDim.x*blockDim.x + j*imgSize;
-      // Offset in unary costs cube array
-      int offsetUC = x+1 + y*gridDim.x*blockDim.x + j*imgSize;
-      MqsHBCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
-                             LAMBDA * thetapq(0, j);
-      for (int i = 1; i <= MAX_DISPARITY; ++i) {
-        int offsetUC = x+1 + y*gridDim.x*blockDim.x + i*imgSize; 
-        float cost = unaryCostsCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
-                             LAMBDA * thetapq(i, j);
-        if (cost < MqsHBCubeD[offsetMP]) {
-          MqsHBCubeD[offsetMP] = cost;
-        }
+  // Loop along the rows to propagate the horizontal message passing
+  for (int col = xSize-2; col >= 0; --col) {
+    offsetMP -= MAX_DISPARITY+1;
+    int offsetUC = d + (col+1)*(MAX_DISPARITY+1) + y*xdSize;
+    MqsHBCubeD[offsetMP] = unaryCostsCubeD[offsetUC] + MqsHBCubeD[offsetUC] + 
+                           LAMBDA * thetapq(0, d);
+    
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
+      float cost = unaryCostsCubeD[offsetUC+j] + MqsHBCubeD[offsetUC+j] +
+                   LAMBDA * thetapq(j, d);
+      if (cost < MqsHBCubeD[offsetMP]) {
+        MqsHBCubeD[offsetMP] = cost;
       }
     }
   }
@@ -1152,22 +1126,22 @@ __global__ void decisionHKernel(float* resultD, float* unaryCostsCubeD,
   if( x >= xSize || y >= ySize )
     return;
   
-  int imgSize = xSize*ySize; 
-  int offsetUC = x + y*gridDim.x*blockDim.x + 0*imgSize;
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offsetUC = 0 + x*(MAX_DISPARITY+1) + y*xdSize;
 
   float minCost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
                   MqsHBCubeD[offsetUC];
   int minIndex = 0;
 
-  for (int i = 1; i <= MAX_DISPARITY; ++i) {
-    offsetUC = x + y*gridDim.x*blockDim.x + i*imgSize;
+  float cost = 0.0f;
 
-    float cost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
-                 MqsHBCubeD[offsetUC];
-
+  for (int d = 1; d <= MAX_DISPARITY; ++d) {
+    offsetUC += 1;
+    cost = unaryCostsCubeD[offsetUC] + MqsHFCubeD[offsetUC] +
+           MqsHBCubeD[offsetUC];
     if(cost < minCost) {
       minCost = cost;
-      minIndex = i;
+      minIndex = d;
     }
   }
 
@@ -1206,7 +1180,6 @@ int main(int argc, char** argv)
    *  Menu with unary cost and message passing options
    *-----------------------------------------------------------------------*/
   int unaryCostOption = 0;
-  int N;
   while (unaryCostOption < 1 || unaryCostOption > 4) {
     std::cout << "**************************************************" << std::endl;
     std::cout << "Unary cost options:" << std::endl;
@@ -1217,10 +1190,6 @@ int main(int argc, char** argv)
     std::cin >> unaryCostOption;
   }
   std::cout << std::endl;
-  if (unaryCostOption != 1) {
-    std::cout << "Select NxN patch: ";
-    std::cin >> N;
-  }
   
   int msgPassingOption = 0;
   std::cout << std::endl;
@@ -1296,14 +1265,14 @@ int main(int argc, char** argv)
     texRight.normalized = true;
 
     // Allocate memory for a unary costs Cube array in the device
-    float* unaryCostsCubeD;
-    cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
+    float* unaryCostsCubeD; // (d, x, y)
+    cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
     CHECK_CUDA_ERROR("Could not allocate device memory for unary costs cube");
 
     // Define Kernel blocks and Grid of blocks for unary costs
     dim3 blockUC(BLOCK_DIM, BLOCK_DIM, 1);
     dim3 gridUC(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
-                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), MAX_DISPARITY+1);
 
     /***************************
       Unitary Costs Kernels 
@@ -1315,15 +1284,15 @@ int main(int argc, char** argv)
     }
     if (unaryCostOption == 2) {
       unaryCostL1NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
-                                                 leftImg.xSize(), leftImg.ySize(), N);
+                                                 leftImg.xSize(), leftImg.ySize());
     }
     if (unaryCostOption == 3) {
       unaryCostL2NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
-                                                 leftImg.xSize(), leftImg.ySize(), N);
+                                                 leftImg.xSize(), leftImg.ySize());
     }
     if (unaryCostOption == 4) {
       unaryCostNCCKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
-                                              leftImg.xSize(), leftImg.ySize(), N);
+                                              leftImg.xSize(), leftImg.ySize());
     }
 
     cudaDeviceSynchronize(); 
@@ -1332,13 +1301,13 @@ int main(int argc, char** argv)
     
     /*************** Message Passing Computation *******************************/
     // Horizontal Message Passing
-    // Allocate memory for a message passing Cube array in the device
+    // Allocate memory for a message passing Cube array in the device (d, x, y)
     float* MqsHFCubeD; // Horizontal Forward
-    cudaMalloc((void**)&MqsHFCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
+    cudaMalloc((void**)&MqsHFCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
     CHECK_CUDA_ERROR("Could not allocate device memory for horizontal forward cube");
 
     float* MqsHBCubeD; // Horizontal Backward
-    cudaMalloc((void**)&MqsHBCubeD, sizeof(float)*leftImg.xSize()*leftImg.ySize()*(MAX_DISPARITY+1));
+    cudaMalloc((void**)&MqsHBCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
     CHECK_CUDA_ERROR("Could not allocate device memory for horizontal backward cube");
 
     /**************************
@@ -1346,7 +1315,7 @@ int main(int argc, char** argv)
      **************************/
     // Define Kernel blocks and Grid of blocks for message passing
     dim3 blockMP(1, BLOCK_DIM, 1);
-    dim3 gridMP(1, std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+    dim3 gridMP(1, std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), MAX_DISPARITY+1);
     
     // Create streams to run the message passing kernels in parallel
     cudaStream_t stream1, stream2;
@@ -1354,16 +1323,13 @@ int main(int argc, char** argv)
     cudaStreamCreate(&stream2);
 
     // Message passing horizontal forward kernel
-    MPHFKernel<<<gridMP, blockMP, 0, stream1>>>(unaryCostsCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
+    MPHFKernel<<<gridMP, blockMP>>>(unaryCostsCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
 
     // Message passing horizontal backward kernel
-    MPHBKernel<<<gridMP, blockMP, 0, stream2>>>(unaryCostsCubeD, MqsHBCubeD, leftImg.xSize(), leftImg.ySize());
+    MPHBKernel<<<gridMP, blockMP>>>(unaryCostsCubeD, MqsHBCubeD, leftImg.xSize(), leftImg.ySize());
 
-    cudaDeviceSynchronize(); // forces buffer flush
+    cudaDeviceSynchronize(); 
     CHECK_CUDA_ERROR("Some message passing task has failed");
-
-    timer::stop("SGM (GPU)");
-    timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
 
     /*************** Decision Computation *******************************/
@@ -1374,6 +1340,12 @@ int main(int argc, char** argv)
     // Decision kernel
     decisionHKernel<<<gridDec, blockDec>>>(resultD, unaryCostsCubeD,
                         MqsHBCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
+    
+    cudaDeviceSynchronize(); 
+    CHECK_CUDA_ERROR("Decision function has failed");
+
+    timer::stop("SGM (GPU)");
+    timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
     // Copy resulting disparity map from device to host
     cudaMemcpy2D((void*)result.data(), sizeof(float)*leftImg.xSize(),
@@ -1409,7 +1381,7 @@ int main(int argc, char** argv)
     std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
   } else {
     std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
-    std::cout << " " << N << "x" << N << " patches";
+    std::cout << " " << N_PATCH << "x" << N_PATCH << " patches";
   }
 
   // Compute EPE against ground truth
