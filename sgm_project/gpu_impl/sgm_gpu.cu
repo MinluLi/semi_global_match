@@ -19,8 +19,8 @@
 static const int N_PATCH = 7;
 
 // Image Textures
-texture<uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> texLeft;
-texture<uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> texRight;
+texture<uchar4, cudaTextureType2D, cudaReadModeElementType> texLeft;
+texture<uchar4, cudaTextureType2D, cudaReadModeElementType> texRight;
 
 /*-------------------------------------------------------------------------
  *  Throw errors in CUDA function calls
@@ -108,25 +108,6 @@ __device__ inline float unaryL2Squared(Color const &a, Color const &b)
          (static_cast<float>(a.z) - static_cast<float>(b.z));
 }
 
-
-/*======================================================================*/
-/*! 
- *   Compute absolute difference of given pixels.
- *
- *   \param a The first pixel
- *   \param b The second pixel
- *
- *   \return L1-distance of a and b
- */
-/*======================================================================*/
-__device__ inline float unaryL1(Color const &a, Color const &b)
-{
-  return abs(static_cast<float>(a.x) - static_cast<float>(b.x)) +
-         abs(static_cast<float>(a.y) - static_cast<float>(b.y)) +
-         abs(static_cast<float>(a.z) - static_cast<float>(b.z));
-}
-
-
 /*======================================================================*/
 /*! 
  *   Compute euclidean L2 distance of given pixels.
@@ -171,15 +152,15 @@ __device__ inline Color averagePixelDevice(bool LR, float u, float v,
       float vkj = v + (float) j/ (float) ySize;
       
       // Read left OR right texel, and round colors to integers
-      float4 texel;
+      Color texel;
       if (LR == 1)
         texel = tex2D(texLeft, ukj, vkj);
       else 
         texel = tex2D(texRight, ukj, vkj);
 
-      averagePixelX += static_cast<float>(lroundf(texel.x*255));
-      averagePixelY += static_cast<float>(lroundf(texel.y*255));
-      averagePixelX += static_cast<float>(lroundf(texel.z*255));
+      averagePixelX += static_cast<float>(texel.x);
+      averagePixelY += static_cast<float>(texel.y);
+      averagePixelX += static_cast<float>(texel.z);
     }
   }
 
@@ -269,8 +250,7 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
     return;
 
   // Position of the thread in the unary costs cube array
-  int xdSize = xSize*(MAX_DISPARITY+1); 
-  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
+  int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
   // Left and Right image pixel
   Color* imgL = (Color*)((char*) leftImg + y*xSize) + x;
   Color* imgR = (Color*)((char*) rightImg + y*xSize) + x-d;
@@ -300,38 +280,86 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
     return;
 
   // Position of the thread in the unary costs cube array
-  int xdSize = xSize*(MAX_DISPARITY+1); 
-  int offset = d + x*(MAX_DISPARITY+1) + y*xdSize;
+  int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
 
-  // Position of the pixel in the Left texture
+  // Position of the pixel in the Left and Right texture
   float uL = (float) x/ (float) xSize;
   float vL = (float) y/ (float) ySize;
+  float uR = uL - (float) d / (float) xSize;
+  float vR = vL;
 
   int lim = static_cast<int>(N_PATCH/2);
 
+  // Read Left image block to shared memory
+  __shared__ Color sharedMemLeft[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
+  int row = threadIdx.y;
+  int col = threadIdx.x;
+  int dev = std::floor(N_PATCH/2);
+
+  sharedMemLeft[row+dev][col+dev] = tex2D(texLeft, uL, vL); // all threads
+  if (row == 0) { // upper side
+    for (int i = 0; i < dev; ++i) {
+      sharedMemLeft[row+i][col+dev] = tex2D(texLeft, uL, vL-(float)(dev-i)/(float)ySize);
+    }
+
+    sharedMemLeft[row][col+1] = tex2D(texLeft, uL, vL-1.0/ySize);
+    if (col == 0) { // corner 0,0
+      sharedMemLeft[row][col] = tex2D(texLeft, uL-1.0/xSize, vL-1.0/ySize);
+    } else if (col == BLOCK_DIM-1) { // corner 1,0
+      sharedMemLeft[row][col+2] = tex2D(texLeft, uL+1.0/xSize, vL-1.0/ySize);
+    }
+  } else if (row == BLOCK_DIM-1) { // bottom side
+    sharedMemLeft[row+2][col+1] = tex2D(texLeft, uL, vL+1.0/ySize);
+    if (col == 0) { // corner 0,1
+      sharedMemLeft[row+2][col] = tex2D(texLeft, uL-1.0/xSize, vL+1.0/ySize);
+    } else if (col == BLOCK_DIM-1) { // corner 1,1
+      sharedMemLeft[row+2][col+2] = tex2D(texLeft, uL+1.0/xSize, vL+1.0/ySize);
+    }
+  }
+  if (col == 0) { // left side
+    sharedMemLeft[row+1][col] = tex2D(texLeft, uL-1.0/xSize, vL);
+  } else if (col == BLOCK_DIM-1) { // right side
+    sharedMemLeft[row+1][col+2] = tex2D(texLeft, uL+1.0/xSize, vL);
+  }
+
+  // Read Right image block to shared memory
+  __shared__ Color sharedMemRight[BLOCK_DIM+2][BLOCK_DIM+2];
+  
+  sharedMemRight[row+1][col+1] = tex2D(texRight, uR, vR); // all threads
+  if (row == 0) { // upper side
+    sharedMemRight[row][col+1] = tex2D(texRight, uR, vR-1.0/ySize);
+    if (col == 0) { // corner 0,0
+      sharedMemRight[row][col] = tex2D(texRight, uR-1.0/xSize, vR-1.0/ySize);
+    } else if (col == BLOCK_DIM-1) { // corner 1,0
+      sharedMemRight[row][col+2] = tex2D(texRight, uR+1.0/xSize, vR-1.0/ySize);
+    }
+  } else if (row == BLOCK_DIM-1) { // bottom side
+    sharedMemRight[row+2][col+1] = tex2D(texRight, uR, vR+1.0/ySize);
+    if (col == 0) { // corner 0,1
+      sharedMemRight[row+2][col] = tex2D(texRight, uR-1.0/xSize, vR+1.0/ySize);
+    } else if (col == BLOCK_DIM-1) { // corner 1,1
+      sharedMemRight[row+2][col+2] = tex2D(texRight, uR+1.0/xSize, vR+1.0/ySize);
+    }
+  }
+  if (col == 0) { // left side
+    sharedMemRight[row+1][col] = tex2D(texRight, uR-1.0/xSize, vR);
+  } else if (col == BLOCK_DIM-1) { // right side
+    sharedMemRight[row+1][col+2] = tex2D(texRight, uR+1.0/xSize, vR);
+  }
+
+  __syncthreads();
+
+  // Compute unary cost by reading the block shared memory
   float theta = 0.0f;
+  Color colorL, colorR;
+  colorL = sharedMemLeft[row][col];
+
   for (int j = -lim; j < lim; ++j) {
     for (int k = -lim; k < lim; ++k) {
-      float uLkj = uL + (float) k/ (float) xSize;
-      float vLkj = vL + (float) j/ (float) ySize;
-      
-      float uRkj = uLkj - (float) d / (float) xSize;
-      float vRkj = vLkj;
-
-      // Read left and right texel, and round colors to integers
-      float4 texelL = tex2D(texLeft, uLkj, vLkj);
-      float4 texelR = tex2D(texRight, uRkj, vRkj);
-
-      Color colorL, colorR;
-      colorL.x = lroundf(texelL.x*255);
-      colorL.y = lroundf(texelL.y*255);
-      colorL.z = lroundf(texelL.z*255);
-
-      colorR.x = lroundf(texelR.x*255);
-      colorR.y = lroundf(texelR.y*255);
-      colorR.z = lroundf(texelR.z*255);
-
-      theta += unaryL1(colorL, colorR);
+      colorR = sharedMemRight[row+j][col+k];
+      theta += abs(static_cast<float>(colorL.x) - static_cast<float>(colorR.x)) +
+               abs(static_cast<float>(colorL.y) - static_cast<float>(colorR.y)) +
+               abs(static_cast<float>(colorL.z) - static_cast<float>(colorR.z));
     }
   }
 
@@ -379,17 +407,17 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
       float vRkj = vLkj;
 
       // Read left and right texel, and round colors to integers
-      float4 texelL = tex2D(texLeft, uLkj, vLkj);
-      float4 texelR = tex2D(texRight, uRkj, vRkj);
+      Color texelL = tex2D(texLeft, uLkj, vLkj);
+      Color texelR = tex2D(texRight, uRkj, vRkj);
 
       Color colorL, colorR;
-      colorL.x = lroundf(texelL.x*255);
-      colorL.y = lroundf(texelL.y*255);
-      colorL.z = lroundf(texelL.z*255);
+      colorL.x = texelL.x;
+      colorL.y = texelL.y;
+      colorL.z = texelL.z;
 
-      colorR.x = lroundf(texelR.x*255);
-      colorR.y = lroundf(texelR.y*255);
-      colorR.z = lroundf(texelR.z*255);
+      colorR.x = texelR.x;
+      colorR.y = texelR.y;
+      colorR.z = texelR.z;
 
       theta += unaryL2Squared(colorL, colorR);
     }
@@ -445,17 +473,17 @@ __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
       float vRkj = vLkj;
 
       // Read left and right texel, and round colors to integers
-      float4 texelL = tex2D(texLeft, uLkj, vLkj);
-      float4 texelR = tex2D(texRight, uRkj, vRkj);
+      Color texelL = tex2D(texLeft, uLkj, vLkj);
+      Color texelR = tex2D(texRight, uRkj, vRkj);
 
       Color colorL, colorR;
-      colorL.x = lroundf(texelL.x*255);
-      colorL.y = lroundf(texelL.y*255);
-      colorL.z = lroundf(texelL.z*255);
+      colorL.x = texelL.x;
+      colorL.y = texelL.y;
+      colorL.z = texelL.z;
 
-      colorR.x = lroundf(texelR.x*255);
-      colorR.y = lroundf(texelR.y*255);
-      colorR.z = lroundf(texelR.z*255);
+      colorR.x = texelR.x;
+      colorR.y = texelR.y;
+      colorR.z = texelR.z;
 
       theta += pixelDotProd(
                 pixelDifference(colorL, averagePixelLeftImg),            
@@ -738,21 +766,19 @@ int main(int argc, char** argv)
      ***************************/
     timer::start("SGM (GPU)");
     timer::start("Unary Costs (GPU)");
-    if (unaryCostOption == 1) {
-      unaryCostEuclideanKernel<<<gridUC, blockUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
+    switch(unaryCostOption) {
+      case 1: unaryCostEuclideanKernel<<<gridUC, blockUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
                                                     leftImg.xSize(), leftImg.ySize());
-    }
-    if (unaryCostOption == 2) {
-      unaryCostL1NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+              break;
+      case 2: unaryCostL1NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
                                                  leftImg.xSize(), leftImg.ySize());
-    }
-    if (unaryCostOption == 3) {
-      unaryCostL2NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+              break;
+      case 3: unaryCostL2NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
                                                  leftImg.xSize(), leftImg.ySize());
-    }
-    if (unaryCostOption == 4) {
-      unaryCostNCCKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+              break;
+      case 4: unaryCostNCCKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
                                               leftImg.xSize(), leftImg.ySize());
+              break;
     }
 
     cudaDeviceSynchronize(); 
@@ -816,6 +842,14 @@ int main(int argc, char** argv)
 
     timer::stop("SGM (GPU)");
     timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
+
+    // Free allocated memory
+    cudaFree(leftImgD);
+    cudaFree(rightImgD);
+    cudaFree(resultD);
+    cudaFree(unaryCostsCubeD);
+    cudaFree(MqsHFCubeD);
+    cudaFree(MqsHBCubeD);
   } catch(std::exception &e) {
     std::cerr << e.what() << std::endl;
     return 1;
