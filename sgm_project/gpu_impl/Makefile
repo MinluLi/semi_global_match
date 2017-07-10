@@ -17,8 +17,8 @@ export NVCCFLAGS = -g -G -O3 -Xcompiler "-fopenmp" \
 	-gencode=arch=compute_50,code=compute_50 \
 	-gencode=arch=compute_50,code=sm_50 \
 	-gencode=arch=compute_61,code=compute_61 \
-	-gencode=arch=compute_61,code=sm_61
-#--ptxas-options=-v
+  -gencode=arch=compute_61,code=sm_61
+#  --ptxas-options=-v
 
 export ARFLAGS = -cru
 
