@@ -15,7 +15,8 @@
 // Block dimension of CUDA kernels
 #define BLOCK_DIM_EUC 32 // Euclidean costs
 #define BLOCK_DIM_L1 16 // L1, L2, NCC costs
-#define BLOCK_DIM_DEC 32 // Decision kernel
+#define BLOCK_DIM_MP 51 // Message passing
+#define BLOCK_DIM_DEC 32 // Decision
 
 // Max threads per block
 #define MAX_THREADS_BLOCK 512
@@ -205,7 +206,7 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
   int d = blockDim.z * blockIdx.z + threadIdx.z;
-  if( x >= xSize || y >= ySize )
+  if( x >= xSize || y >= ySize || d >= MAX_DISPARITY+1)
     return;
 
   // Position of the thread in the unary costs cube array
@@ -239,7 +240,7 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
   int d = blockDim.z * blockIdx.z + threadIdx.z;
-  if( x >= xSize || y >= ySize )
+  if( x >= xSize || y >= ySize || d >= MAX_DISPARITY+1)
     return;
 
   // Position of the thread in the unary costs cube array
@@ -400,7 +401,7 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
   int d = blockDim.z * blockIdx.z + threadIdx.z;
-  if( x >= xSize || y >= ySize )
+  if( x >= xSize || y >= ySize || d >= MAX_DISPARITY+1)
     return;
 
   // Position of the thread in the unary costs cube array
@@ -560,7 +561,7 @@ __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
   int d = blockDim.z * blockIdx.z + threadIdx.z;
-  if( x >= xSize || y >= ySize )
+  if( x >= xSize || y >= ySize || d >= MAX_DISPARITY+1)
     return;
 
   // Position of the thread in the unary costs cube array
@@ -759,8 +760,8 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
                            int xSize, int ySize)
 {
   int d = threadIdx.x;
-  int y = blockIdx.x;
-  if( d > MAX_DISPARITY+1  || y >= ySize )
+  int y = blockIdx.y;
+  if( d >= MAX_DISPARITY+1  || y >= ySize )
     return;
 
   // Shared memory to store intermediate results along the columns
@@ -783,7 +784,7 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
     __syncthreads();
 
     minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
-    for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
       cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
@@ -793,7 +794,6 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
     MqsHFCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC += MAX_DISPARITY+1;
-    __syncthreads();
   }
 }
 
@@ -814,8 +814,8 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
                            int xSize, int ySize)
 {
   int d = threadIdx.x;
-  int y = blockIdx.x;
-  if( d > MAX_DISPARITY+1  || y >= ySize )
+  int y = blockIdx.y;
+  if( d >= MAX_DISPARITY+1  || y >= ySize )
     return;
 
   // Shared memory to store intermediate results along the columns
@@ -823,7 +823,7 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
   __shared__ float unaryCostsSharedMem[MAX_DISPARITY+1];
   // Position of the thread in the message passing cube array  
   int xdSize = xSize*(MAX_DISPARITY+1); 
-  int offsetMP = d + (xSize-1)*(MAX_DISPARITY+1) + y*xdSize; // x=0
+  int offsetMP = d + (xSize-1)*(MAX_DISPARITY+1) + y*xdSize; // x=xSize
   MqsHBCubeD[offsetMP] = 0.0f;
   Mpq[d] = 0.0f;
   __syncthreads();
@@ -838,7 +838,7 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
     __syncthreads();
 
     minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
-    for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
       cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
@@ -848,7 +848,6 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
     MqsHBCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC -= MAX_DISPARITY+1;
-    __syncthreads();
   }
 }
 
@@ -870,7 +869,7 @@ __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
 {
   int d = threadIdx.x;
   int x = blockIdx.x;
-  if( d > MAX_DISPARITY+1  || x >= xSize )
+  if( d >= MAX_DISPARITY+1  || x >= xSize )
     return;
 
   // Shared memory to store intermediate results along the columns
@@ -893,7 +892,7 @@ __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
     __syncthreads();
 
     minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
-    for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
       cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
@@ -903,7 +902,6 @@ __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
     MqsVFCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC += xdSize;
-    __syncthreads();
   }
 }
 
@@ -925,7 +923,7 @@ __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
 {
   int d = threadIdx.x;
   int x = blockIdx.x;
-  if( d > MAX_DISPARITY+1  || x >= ySize )
+  if( d >= MAX_DISPARITY+1  || x >= ySize )
     return;
 
   // Shared memory to store intermediate results along the columns
@@ -947,9 +945,9 @@ __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
     __syncthreads();
 
-    minCost = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(0, d);
-    for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
-      Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
+    minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
+    for (int j = 1; j <= MAX_DISPARITY; ++j) {
+      cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
       }
@@ -958,7 +956,6 @@ __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
     MqsVBCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC -= xdSize;
-    __syncthreads();
   }
 }
 
@@ -1005,6 +1002,51 @@ __global__ void decisionHKernel(float* resultD, float* unaryCostsCubeD,
   int offset = x + y*xSize;
   resultD[offset] = minIndex;
 }
+
+
+/*======================================================================*/
+/*! 
+ *   Compute decision of all incoming VERTICAL messages to every pixel
+ *
+ *   \param resultD Image with resulting disparity
+ *   \param unaryCostsCubeD Cube with unary costs
+ *   \param MqsVFCubeD Cube with message passing costs
+ *   \param MqsVBCubeD Cube with message passing costs
+ *   \param xSize xSize of original left image 
+ *   \param ySize ySize of original left image 
+ *
+ *   \return None
+ */
+/*======================================================================*/
+__global__ void decisionVKernel(float* resultD, float* unaryCostsCubeD,
+                float* MqsVFCubeD, float* MqsVBCubeD, int xSize, int ySize)
+{
+  int x = blockDim.x * blockIdx.x + threadIdx.x;
+  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  if( x >= xSize || y >= ySize )
+    return;
+  
+  int xdSize = xSize*(MAX_DISPARITY+1); 
+  int offsetUC = 0 + x*(MAX_DISPARITY+1) + y*xdSize;
+
+  float minCost = unaryCostsCubeD[offsetUC] + MqsVFCubeD[offsetUC] +
+                  MqsVBCubeD[offsetUC];
+  int minIndex = 0;
+  float cost = 0.0f;
+  for (int d = 1; d <= MAX_DISPARITY; ++d) {
+    offsetUC += 1;
+    cost = unaryCostsCubeD[offsetUC] + MqsVFCubeD[offsetUC] +
+           MqsVBCubeD[offsetUC];
+    if(cost < minCost) {
+      minCost = cost;
+      minIndex = d;
+    }
+  }
+
+  int offset = x + y*xSize;
+  resultD[offset] = minIndex;
+}
+
 
 
 /*======================================================================*/
@@ -1082,8 +1124,9 @@ int main(int argc, char** argv)
   // msgPassOption map (horizontal, vertical, diagonal)
   std::map<int, std::string> msgPassOptionMap;
   msgPassOptionMap.insert(std::make_pair(1, "horizontal"));
-  msgPassOptionMap.insert(std::make_pair(2, "horizontal + vertical"));
-  msgPassOptionMap.insert(std::make_pair(3, "horizontal + vertical + diagonal"));
+  msgPassOptionMap.insert(std::make_pair(2, "vertical"));
+  msgPassOptionMap.insert(std::make_pair(3, "horizontal + vertical"));
+  msgPassOptionMap.insert(std::make_pair(4, "horizontal + vertical + diagonal"));
 
   /*-----------------------------------------------------------------------
    *  Menu with unary cost and message passing options
@@ -1102,11 +1145,12 @@ int main(int argc, char** argv)
   
   int msgPassingOption = 0;
   std::cout << std::endl;
-  while (msgPassingOption < 1 || msgPassingOption > 3) {
+  while (msgPassingOption < 1 || msgPassingOption > 4) {
     std::cout << "Message Passing Options:" << std::endl;
     std::cout << "1 - Horizontal" << std::endl;
-    std::cout << "2 - Horizontal + Vertical" << std::endl;
-    std::cout << "3 - Horizontal + Vertical + Diagonal" << std::endl;
+    std::cout << "2 - Vertical" << std::endl;
+    std::cout << "3 - Horizontal + Vertical" << std::endl;
+    std::cout << "4 - Horizontal + Vertical + Diagonal" << std::endl;
     std::cin >> msgPassingOption;
   }
 
@@ -1226,8 +1270,8 @@ int main(int argc, char** argv)
 
       // Message Passing Kernerls 
       // Define Kernel blocks and Grid of blocks for HORIZONTAL message passing
-      dim3 blockMPH(MAX_DISPARITY+1, 1, 1);
-      dim3 gridMPH(leftImg.ySize(), 1, 1);
+      dim3 blockMPH(BLOCK_DIM_MP, 1, 1);
+      dim3 gridMPH(1, leftImg.ySize(), 1);
       
       timer::start("Message Passing Horizontal (GPU)");
       // Message passing horizontal forward kernel
@@ -1252,7 +1296,7 @@ int main(int argc, char** argv)
 
       // Message Passing Kernerls
       // Define Kernel blocks and Grid of blocks for HORIZONTAL message passing
-      dim3 blockMPV(MAX_DISPARITY+1, 1, 1);
+      dim3 blockMPV(BLOCK_DIM_MP, 1, 1);
       dim3 gridMPV(leftImg.xSize(), 1, 1);
       
       timer::start("Message Passing Vertical (GPU)");
@@ -1279,11 +1323,16 @@ int main(int argc, char** argv)
     switch(msgPassingOption) {
       case 1: // Decision kernel Horizontal
               decisionHKernel<<<gridDec, blockDec>>>(resultD, unaryCostsCubeD,
-                        MqsHBCubeD, MqsHFCubeD, leftImg.xSize(), leftImg.ySize());
+                        MqsHFCubeD, MqsHBCubeD, leftImg.xSize(), leftImg.ySize());
               break;
-      case 2: // Decision kernel Horizontal + Vertical
+      case 2: // Decision kernel Vertical 
+              decisionVKernel<<<gridDec, blockDec>>>(resultD, unaryCostsCubeD,
+                        MqsVFCubeD, MqsVBCubeD, leftImg.xSize(), leftImg.ySize());
+              break;
+ 
+      case 3: // Decision kernel Horizontal + Vertical
               decisionHVKernel<<<gridDec, blockDec>>>(resultD, unaryCostsCubeD,
-                                MqsHBCubeD, MqsHFCubeD, MqsVFCubeD, MqsVBCubeD,
+                                MqsHFCubeD, MqsHBCubeD, MqsVFCubeD, MqsVBCubeD,
                                 leftImg.xSize(), leftImg.ySize());
               break;
     }
