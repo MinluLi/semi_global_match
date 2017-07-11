@@ -15,7 +15,7 @@
 // Block dimension of CUDA kernels
 #define BLOCK_DIM_EUC 32 // Euclidean costs
 #define BLOCK_DIM_L1 16 // L1, L2, NCC costs
-#define BLOCK_DIM_MP 51 // Message passing
+#define BLOCK_DIM_MP 64 // Message passing
 #define BLOCK_DIM_DEC 32 // Decision
 
 // Max threads per block
@@ -923,7 +923,7 @@ __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
 {
   int d = threadIdx.x;
   int x = blockIdx.x;
-  if( d >= MAX_DISPARITY+1  || x >= ySize )
+  if( d >= MAX_DISPARITY+1  || x >= xSize )
     return;
 
   // Shared memory to store intermediate results along the columns

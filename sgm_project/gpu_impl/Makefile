@@ -5,9 +5,9 @@ export CXX = g++
 export NVCC = nvcc
 export AR = ar
 
-export CFLAGS = -Wall -Wextra -pedantic -O3 -fopenmp
-export CXXFLAGS = -Wall -Wextra -pedantic -O3 -fopenmp
-export NVCCFLAGS = -g -O3 -Xcompiler "-fopenmp" \
+export CFLAGS = -Wall -Wextra -pedantic -O2 -fopenmp
+export CXXFLAGS = -Wall -Wextra -pedantic -O2 -fopenmp
+export NVCCFLAGS = -g -O2 -Xcompiler "-fopenmp" \
   -gencode=arch=compute_20,code=compute_20 \
 	-gencode=arch=compute_20,code=sm_20 \
 	-gencode=arch=compute_30,code=compute_30 \
