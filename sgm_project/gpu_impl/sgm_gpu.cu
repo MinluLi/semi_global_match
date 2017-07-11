@@ -13,7 +13,12 @@
 #include <stdlib.h>
 
 // Block dimension of CUDA kernels
-#define BLOCK_DIM 16
+#define BLOCK_DIM_EUC 32 // Euclidean costs
+#define BLOCK_DIM_L1 16 // L1, L2, NCC costs
+#define BLOCK_DIM_DEC 32 // Decision kernel
+
+// Max threads per block
+#define MAX_THREADS_BLOCK 512
 
 // NxN Patch size
 static const int N_PATCH = 7;
@@ -205,11 +210,15 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
 
   // Position of the thread in the unary costs cube array
   int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
-  // Left and Right image pixel
-  Color* imgL = (Color*)((char*) leftImg + y*xSize) + x;
-  Color* imgR = (Color*)((char*) rightImg + y*xSize) + x-d;
 
-  unaryCostsCubeD[offset] = unaryEuclidean(*imgL, *imgR);
+  if (x-d < 0) {
+    unaryCostsCubeD[offset] = 1.0e9f;
+  } else {
+    // Left and Right image pixel
+    Color* imgL = (Color*)((char*)leftImg) + y*xSize + x;
+    Color* imgR = (Color*)((char*)rightImg) + y*xSize + x-d; 
+    unaryCostsCubeD[offset] = unaryEuclidean(*imgL, *imgR); 
+  }
 }
 
 
@@ -236,138 +245,141 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
   // Position of the thread in the unary costs cube array
   int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
 
-  // Position of the pixel in the Left and Right texture
-  float uL = (float) x/ (float) xSize;
-  float vL = (float) y/ (float) ySize;
-  float uR = uL - (float) d / (float) xSize;
-  float vR = vL;
+  if (x -d < 0) {
+    unaryCostsCubeD[offset] = 1.0e9f;
+  } else {
+    // Position of the pixel in the Left and Right texture
+    float uL = (float) x/ (float) xSize;
+    float vL = (float) y/ (float) ySize;
+    float uR = uL - (float) d / (float) xSize;
+    float vR = vL;
 
-  // Read Left image block to shared memory
-  __shared__ Color sharedMemLeft[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-  int row = threadIdx.y;
-  int col = threadIdx.x;
+    // Read Left image block to shared memory
+    __shared__ Color sharedMemLeft[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+    int row = threadIdx.y;
+    int col = threadIdx.x;
 
-  sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
+    sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
+    if (row == 0) { // upper side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
         }
       }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                               vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                                     vL+(float)(j+1)/(float)ySize);
+          }
         }
       }
     }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
+    if (col == 0) { // left side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                             vL-(float)(DEV-j)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
       }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
+    } else if (col == BLOCK_DIM_L1-1) { // right side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                                   vL+(float)(j+1)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
       }
     }
+
+    // Read Right image block to shared memory
+    __shared__ Color sharedMemRight[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+
+    sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
+    if (row == 0) { // upper side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      }
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                               vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                                     vR+(float)(j+1)/(float)ySize);
+          }
+        }
+      }
+    }
+    if (col == 0) { // left side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
+      }
+    } else if (col == BLOCK_DIM_L1-1) { // right side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
+      }
+    }
+
+    __syncthreads();
+    // Compute unary cost by reading the block shared memory
+    float theta = 0.0f;
+    Color colorL, colorR;
+    row += DEV;
+    col += DEV;
+
+    for (int j = -DEV; j < DEV; ++j) {
+      for (int k = -DEV; k < DEV; ++k) {
+        colorL = sharedMemLeft[row+j][col+k];
+        colorR = sharedMemRight[row+j][col+k];
+        theta += abs(static_cast<float>(colorL.x) - static_cast<float>(colorR.x)) +
+                 abs(static_cast<float>(colorL.y) - static_cast<float>(colorR.y)) +
+                 abs(static_cast<float>(colorL.z) - static_cast<float>(colorR.z));
+      }
+    }
+    unaryCostsCubeD[offset] = theta;
   }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
-    }
-  }
-
-  // Read Right image block to shared memory
-  __shared__ Color sharedMemRight[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-
-  sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                             vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                                   vR+(float)(j+1)/(float)ySize);
-        }
-      }
-    }
-  }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
-    }
-  }
-
-  __syncthreads();
-
-  // Compute unary cost by reading the block shared memory
-  float theta = 0.0f;
-  Color colorL, colorR;
-  row += DEV;
-  col += DEV;
-
-  for (int j = -DEV; j < DEV; ++j) {
-    for (int k = -DEV; k < DEV; ++k) {
-      colorL = sharedMemLeft[row+j][col+k];
-      colorR = sharedMemRight[row+j][col+k];
-      theta += abs(static_cast<float>(colorL.x) - static_cast<float>(colorR.x)) +
-               abs(static_cast<float>(colorL.y) - static_cast<float>(colorR.y)) +
-               abs(static_cast<float>(colorL.z) - static_cast<float>(colorR.z));
-    }
-  }
-  unaryCostsCubeD[offset] = theta;
 }
 
 
@@ -394,136 +406,140 @@ __global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
   // Position of the thread in the unary costs cube array
   int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
 
-  // Position of the pixel in the Left and Right texture
-  float uL = (float) x/ (float) xSize;
-  float vL = (float) y/ (float) ySize;
-  float uR = uL - (float) d / (float) xSize;
-  float vR = vL;
+  if (x -d < 0) {
+    unaryCostsCubeD[offset] = 1.0e9f;
+  } else {
+    // Position of the pixel in the Left and Right texture
+    float uL = (float) x/ (float) xSize;
+    float vL = (float) y/ (float) ySize;
+    float uR = uL - (float) d / (float) xSize;
+    float vR = vL;
 
-  // Read Left image block to shared memory
-  __shared__ Color sharedMemLeft[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-  int row = threadIdx.y;
-  int col = threadIdx.x;
+    // Read Left image block to shared memory
+    __shared__ Color sharedMemLeft[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+    int row = threadIdx.y;
+    int col = threadIdx.x;
 
-  sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
+    sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
+    if (row == 0) { // upper side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
         }
       }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                               vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                                     vL+(float)(j+1)/(float)ySize);
+          }
         }
       }
     }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
+    if (col == 0) { // left side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                             vL-(float)(DEV-j)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
       }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
+    } else if (col == BLOCK_DIM_L1-1) { // right side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                                   vL+(float)(j+1)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
       }
     }
+
+    // Read Right image block to shared memory
+    __shared__ Color sharedMemRight[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+
+    sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
+    if (row == 0) { // upper side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      }
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                               vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                                     vR+(float)(j+1)/(float)ySize);
+          }
+        }
+      }
+    }
+    if (col == 0) { // left side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
+      }
+    } else if (col == BLOCK_DIM_L1-1) { // right side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
+      }
+    }
+
+    __syncthreads();
+
+    // Compute unary cost by reading the block shared memory
+    float theta = 0.0f;
+    Color colorL, colorR;
+    row += DEV;
+    col += DEV;
+
+    for (int j = -DEV; j < DEV; ++j) {
+      for (int k = -DEV; k < DEV; ++k) {
+        colorL = sharedMemLeft[row+j][col+k];
+        colorR = sharedMemRight[row+j][col+k];
+        theta += unaryL2Squared(colorL, colorR);
+      }
+    }
+    unaryCostsCubeD[offset] = theta;
   }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
-    }
-  }
-
-  // Read Right image block to shared memory
-  __shared__ Color sharedMemRight[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-
-  sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                             vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                                   vR+(float)(j+1)/(float)ySize);
-        }
-      }
-    }
-  }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
-    }
-  }
-
-  __syncthreads();
-
-  // Compute unary cost by reading the block shared memory
-  float theta = 0.0f;
-  Color colorL, colorR;
-  row += DEV;
-  col += DEV;
-
-  for (int j = -DEV; j < DEV; ++j) {
-    for (int k = -DEV; k < DEV; ++k) {
-      colorL = sharedMemLeft[row+j][col+k];
-      colorR = sharedMemRight[row+j][col+k];
-      theta += unaryL2Squared(colorL, colorR);
-    }
-  }
-  unaryCostsCubeD[offset] = theta;
 }
 
 
@@ -550,176 +566,180 @@ __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
   // Position of the thread in the unary costs cube array
   int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
 
-  // Position of the pixel in the Left and Right texture
-  float uL = (float) x/ (float) xSize;
-  float vL = (float) y/ (float) ySize;
-  float uR = uL - (float) d / (float) xSize;
-  float vR = vL;
+  if (x -d < 0) {
+    unaryCostsCubeD[offset] = 1.0e9f;
+  } else {
+    // Position of the pixel in the Left and Right texture
+    float uL = (float) x/ (float) xSize;
+    float vL = (float) y/ (float) ySize;
+    float uR = uL - (float) d / (float) xSize;
+    float vR = vL;
 
-  // Read Left image block to shared memory
-  __shared__ Color sharedMemLeft[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-  int row = threadIdx.y;
-  int col = threadIdx.x;
+    // Read Left image block to shared memory
+    __shared__ Color sharedMemLeft[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+    int row = threadIdx.y;
+    int col = threadIdx.x;
 
-  sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
+    sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
+    if (row == 0) { // upper side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                         vL-(float)(DEV-j)/(float)ySize);
+          }
         }
       }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                       vL-(float)(DEV-j)/(float)ySize);
+        sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                               vL-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
+                                                                     vL+(float)(j+1)/(float)ySize);
+          }
         }
       }
     }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
+    if (col == 0) { // left side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                             vL-(float)(DEV-j)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
       }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
+    } else if (col == BLOCK_DIM_L1-1) { // right side
       for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                                   vL+(float)(j+1)/(float)ySize);
-        }
+        sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
       }
     }
+
+    // Read Right image block to shared memory
+    __shared__ Color sharedMemRight[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
+
+    sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
+    if (row == 0) { // upper side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
+      }
+      if (col == 0) { // corner 0,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                         vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      }
+    } else if (row == BLOCK_DIM_L1-1) { // bottom side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
+      }
+      if (col == 0) { // corner 1,0
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                               vR-(float)(DEV-j)/(float)ySize);
+          }
+        }
+      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
+        for (int i = 0; i < DEV; ++i) {
+          for (int j = 0; j < DEV; ++j) {
+            sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
+                                                                     vR+(float)(j+1)/(float)ySize);
+          }
+        }
+      }
+    }
+    if (col == 0) { // left side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
+      }
+    } else if (col == BLOCK_DIM_L1-1) { // right side
+      for (int i = 0; i < DEV; ++i) {
+        sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
+      }
+    }
+
+    __syncthreads();
+
+    /**** Compute unary cost by reading the block shared memory ****/
+    Color colorL, colorR;
+    row += DEV;
+    col += DEV;
+
+    // Average left and right pixel
+    Color avgPixelLeftImg, avgPixelRightImg;
+    float avgPixelLeftImgX = 0.0f;
+    float avgPixelLeftImgY = 0.0f;
+    float avgPixelLeftImgZ = 0.0f;
+    float avgPixelRightImgX = 0.0f;
+    float avgPixelRightImgY = 0.0f;
+    float avgPixelRightImgZ = 0.0f;
+
+    for (int j = -DEV; j < DEV; ++j) {
+      for (int k = -DEV; k < DEV; ++k) {
+        colorL = sharedMemLeft[row+j][col+k];
+        colorR = sharedMemRight[row+j][col+k];
+        avgPixelLeftImgX += colorL.x;
+        avgPixelLeftImgY += colorL.y;
+        avgPixelLeftImgZ += colorL.z;
+        avgPixelRightImgX += colorR.x;
+        avgPixelRightImgY += colorR.y;
+        avgPixelRightImgZ += colorR.z;
+      }
+    }
+
+    avgPixelLeftImg.x = avgPixelLeftImgX/(N_PATCH*N_PATCH);
+    avgPixelLeftImg.y = avgPixelLeftImgY/(N_PATCH*N_PATCH);
+    avgPixelLeftImg.z = avgPixelLeftImgZ/(N_PATCH*N_PATCH);
+    avgPixelRightImg.x = avgPixelRightImgX/(N_PATCH*N_PATCH);
+    avgPixelRightImg.y = avgPixelRightImgY/(N_PATCH*N_PATCH);
+    avgPixelRightImg.z = avgPixelRightImgZ/(N_PATCH*N_PATCH);
+
+    // Compute NCC between pixels
+    float theta = 0.0f;
+    float varLeftImg = 0.0f;
+    float varRightImg = 0.0f;
+
+    for (int j = -DEV; j < DEV; ++j) {
+      for (int k = -DEV; k < DEV; ++k) {
+        colorL = sharedMemLeft[row+j][col+k];
+        colorR = sharedMemRight[row+j][col+k];
+
+        theta += pixelDotProd(
+                  pixelDifference(colorL, avgPixelLeftImg),            
+                  pixelDifference(colorR, avgPixelRightImg));
+        // Variance of left Image
+        varLeftImg += unaryL2Squared(colorL, avgPixelLeftImg);
+        // Variance of right Image
+        varRightImg += unaryL2Squared(colorR, avgPixelRightImg);
+      }
+    }
+    unaryCostsCubeD[offset] = -abs(theta/std::sqrt(varLeftImg*varRightImg));
   }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
-    }
-  }
-
-  // Read Right image block to shared memory
-  __shared__ Color sharedMemRight[BLOCK_DIM+N_PATCH-1][BLOCK_DIM+N_PATCH-1];
-
-  sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
-  if (row == 0) { // upper side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
-    }
-    if (col == 0) { // corner 0,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 0,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                       vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    }
-  } else if (row == BLOCK_DIM-1) { // bottom side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
-    }
-    if (col == 0) { // corner 1,0
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                             vR-(float)(DEV-j)/(float)ySize);
-        }
-      }
-    } else if (col == BLOCK_DIM-1) { // corner 1,1
-      for (int i = 0; i < DEV; ++i) {
-        for (int j = 0; j < DEV; ++j) {
-          sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                                   vR+(float)(j+1)/(float)ySize);
-        }
-      }
-    }
-  }
-  if (col == 0) { // left side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
-    }
-  } else if (col == BLOCK_DIM-1) { // right side
-    for (int i = 0; i < DEV; ++i) {
-      sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
-    }
-  }
-
-  __syncthreads();
-
-  /**** Compute unary cost by reading the block shared memory ****/
-  Color colorL, colorR;
-  row += DEV;
-  col += DEV;
-
-  // Average left and right pixel
-  Color avgPixelLeftImg, avgPixelRightImg;
-  float avgPixelLeftImgX = 0.0f;
-  float avgPixelLeftImgY = 0.0f;
-  float avgPixelLeftImgZ = 0.0f;
-  float avgPixelRightImgX = 0.0f;
-  float avgPixelRightImgY = 0.0f;
-  float avgPixelRightImgZ = 0.0f;
-
-  for (int j = -DEV; j < DEV; ++j) {
-    for (int k = -DEV; k < DEV; ++k) {
-      colorL = sharedMemLeft[row+j][col+k];
-      colorR = sharedMemRight[row+j][col+k];
-      avgPixelLeftImgX += colorL.x;
-      avgPixelLeftImgY += colorL.y;
-      avgPixelLeftImgZ += colorL.z;
-      avgPixelRightImgX += colorR.x;
-      avgPixelRightImgY += colorR.y;
-      avgPixelRightImgZ += colorR.z;
-    }
-  }
-
-  avgPixelLeftImg.x = avgPixelLeftImgX/(N_PATCH*N_PATCH);
-  avgPixelLeftImg.y = avgPixelLeftImgY/(N_PATCH*N_PATCH);
-  avgPixelLeftImg.z = avgPixelLeftImgZ/(N_PATCH*N_PATCH);
-  avgPixelRightImg.x = avgPixelRightImgX/(N_PATCH*N_PATCH);
-  avgPixelRightImg.y = avgPixelRightImgY/(N_PATCH*N_PATCH);
-  avgPixelRightImg.z = avgPixelRightImgZ/(N_PATCH*N_PATCH);
-
-  // Compute NCC between pixels
-  float theta = 0.0f;
-  float varLeftImg = 0.0f;
-  float varRightImg = 0.0f;
-
-  for (int j = -DEV; j < DEV; ++j) {
-    for (int k = -DEV; k < DEV; ++k) {
-      colorL = sharedMemLeft[row+j][col+k];
-      colorR = sharedMemRight[row+j][col+k];
-
-      theta += pixelDotProd(
-                pixelDifference(colorL, avgPixelLeftImg),            
-                pixelDifference(colorR, avgPixelRightImg));
-      // Variance of left Image
-      varLeftImg += unaryL2Squared(colorL, avgPixelLeftImg);
-      // Variance of right Image
-      varRightImg += unaryL2Squared(colorR, avgPixelRightImg);
-    }
-  }
-  unaryCostsCubeD[offset] = theta/std::sqrt(varLeftImg*varRightImg);
 }
 
 
@@ -738,8 +758,8 @@ __global__ void unaryCostNCCKernel(float* unaryCostsCubeD,
 __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
                            int xSize, int ySize)
 {
-  int d = blockDim.x * blockIdx.x + threadIdx.x;
-  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = threadIdx.x;
+  int y = blockIdx.x;
   if( d > MAX_DISPARITY+1  || y >= ySize )
     return;
 
@@ -755,19 +775,21 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
 
   // Loop over the columns to pass the messages
   int offsetUC = d + 0*(MAX_DISPARITY+1) + y*xdSize;
+  float cost = 0.0f;
+  float minCost = 0.0f;
   for (int x = 1; x < xSize; ++x) {
     offsetMP += MAX_DISPARITY+1;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
-    Mpq[d] = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(d, 0);
     __syncthreads();
 
-    float minCost = Mpq[d];
+    minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
     for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
-      float cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
+      cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
       }
     }
+    __syncthreads();
     MqsHFCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC += MAX_DISPARITY+1;
@@ -791,8 +813,8 @@ __global__ void MPHFKernel(float* unaryCostsCubeD, float* MqsHFCubeD,
 __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
                            int xSize, int ySize)
 {
-  int d = blockDim.x * blockIdx.x + threadIdx.x;
-  int y = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = threadIdx.x;
+  int y = blockIdx.x;
   if( d > MAX_DISPARITY+1  || y >= ySize )
     return;
 
@@ -808,19 +830,21 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
 
   // Loop over the columns to pass the messages
   int offsetUC = d + (xSize-1)*(MAX_DISPARITY+1) + y*xdSize;
+  float cost = 0.0f;
+  float minCost = 0.0f;
   for (int x = xSize-2; x >= 0; --x) {
     offsetMP -= MAX_DISPARITY+1;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
-    Mpq[d] = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(d, 0);
     __syncthreads();
 
-    float minCost = Mpq[d];
+    minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
     for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
-      float cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
+      cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
       }
     }
+    __syncthreads();
     MqsHBCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC -= MAX_DISPARITY+1;
@@ -844,8 +868,8 @@ __global__ void MPHBKernel(float* unaryCostsCubeD, float* MqsHBCubeD,
 __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
                            int xSize, int ySize)
 {
-  int d = blockDim.x * blockIdx.x + threadIdx.x;
-  int x = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = threadIdx.x;
+  int x = blockIdx.x;
   if( d > MAX_DISPARITY+1  || x >= xSize )
     return;
 
@@ -861,19 +885,21 @@ __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
 
   // Loop over the rows to pass the messages
   int offsetUC = d + x*(MAX_DISPARITY+1) + 0*xdSize;
+  float cost = 0.0f;
+  float minCost = 0.0f;
   for (int y = 1; y < ySize; ++y) {
     offsetMP += xdSize;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
-    Mpq[d] = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(d, 0);
     __syncthreads();
 
-    float minCost = Mpq[d];
+    minCost = Mpq[0] + unaryCostsSharedMem[0] + LAMBDA*thetapq(0, d);
     for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
-      float cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
+      cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
       }
     }
+    __syncthreads();
     MqsVFCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC += xdSize;
@@ -897,8 +923,8 @@ __global__ void MPVFKernel(float* unaryCostsCubeD, float* MqsVFCubeD,
 __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
                            int xSize, int ySize)
 {
-  int d = blockDim.x * blockIdx.x + threadIdx.x;
-  int x = blockDim.y * blockIdx.y + threadIdx.y;
+  int d = threadIdx.x;
+  int x = blockIdx.x;
   if( d > MAX_DISPARITY+1  || x >= ySize )
     return;
 
@@ -914,19 +940,21 @@ __global__ void MPVBKernel(float* unaryCostsCubeD, float* MqsVBCubeD,
 
   // Loop over the rows to pass the messages
   int offsetUC = d + x*(MAX_DISPARITY+1) + (ySize-1)*xdSize;
+  float cost = 0.0f;
+  float minCost = 0.0f;
   for (int y = ySize-2; y >= 0; --y) {
     offsetMP -= xdSize;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
-    Mpq[d] = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(d, 0);
     __syncthreads();
 
-    float minCost = Mpq[d];
+    minCost = Mpq[d] + unaryCostsSharedMem[d] + LAMBDA*thetapq(0, d);
     for (int j = 1; j <= MAX_DISPARITY+1; ++j) {
-      float cost = Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
+      Mpq[j] + unaryCostsSharedMem[j] + LAMBDA*thetapq(j, d);
       if (cost < minCost) {
         minCost = cost;
       }
     }
+    __syncthreads();
     MqsVBCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
     offsetUC -= xdSize;
@@ -1110,14 +1138,14 @@ int main(int argc, char** argv)
     float* resultD;
 
     // Allocate and copy memory of left, right and result from host to device
-    cudaMalloc(&leftImgD, sizeof(Color)*leftImg.size());
+    cudaMalloc((void**) &leftImgD, sizeof(Color)*leftImg.size());
     CHECK_CUDA_ERROR("Could not allocate device memory for left image");
     cudaMemcpy2D((void*) leftImgD, sizeof(Color)*leftImg.xSize(), (void*) leftImg.data(),
                  sizeof(Color)*leftImg.xSize(), sizeof(Color)*leftImg.xSize(),
                  leftImg.ySize(), cudaMemcpyHostToDevice);
     CHECK_CUDA_ERROR("Could not copy input left image from host to device");
 
-    cudaMalloc(&rightImgD, sizeof(Color)*rightImg.size());
+    cudaMalloc((void**) &rightImgD, sizeof(Color)*rightImg.size());
     CHECK_CUDA_ERROR("Could not allocate device memory for left image");
     cudaMemcpy2D((void*) rightImgD, sizeof(Color)*rightImg.xSize(), (void*) rightImg.data(),
                  sizeof(Color)*rightImg.xSize(), sizeof(Color)*rightImg.xSize(),
@@ -1150,27 +1178,31 @@ int main(int argc, char** argv)
     cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
     CHECK_CUDA_ERROR("Could not allocate device memory for unary costs cube");
 
-    // Define Kernel blocks and Grid of blocks for unary costs
-    dim3 blockUC(BLOCK_DIM, BLOCK_DIM, 1);
-    dim3 gridUC(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
-                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), MAX_DISPARITY+1);
-
     /***************************
       Unitary Costs Kernels 
      ***************************/
+    // Define Kernel blocks and Grid of blocks for unary costs
+    dim3 blockUC_EUC(BLOCK_DIM_EUC, BLOCK_DIM_EUC, 1);
+    dim3 gridUC_EUC(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM_EUC),
+                std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM_EUC), MAX_DISPARITY+1);
+
+    dim3 blockUC_L1(BLOCK_DIM_L1, BLOCK_DIM_L1, 1);
+    dim3 gridUC_L1(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM_L1),
+                std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM_L1), MAX_DISPARITY+1);
+
     timer::start("SGM (GPU)");
     timer::start("Unary Costs (GPU)");
     switch(unaryCostOption) {
-      case 1: unaryCostEuclideanKernel<<<gridUC, blockUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
+      case 1: unaryCostEuclideanKernel<<<gridUC_EUC, blockUC_EUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
                                                     leftImg.xSize(), leftImg.ySize());
               break;
-      case 2: unaryCostL1NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+      case 2: unaryCostL1NormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
                                                  leftImg.xSize(), leftImg.ySize());
               break;
-      case 3: unaryCostL2NormKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+      case 3: unaryCostL2NormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
                                                  leftImg.xSize(), leftImg.ySize());
               break;
-      case 4: unaryCostNCCKernel<<<gridUC, blockUC>>>(unaryCostsCubeD,
+      case 4: unaryCostNCCKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
                                               leftImg.xSize(), leftImg.ySize());
               break;
     }
@@ -1195,15 +1227,10 @@ int main(int argc, char** argv)
       // Message Passing Kernerls 
       // Define Kernel blocks and Grid of blocks for HORIZONTAL message passing
       dim3 blockMPH(MAX_DISPARITY+1, 1, 1);
-      dim3 gridMPH(1, leftImg.ySize(), 1);
-      
-      // Create streams to run the message passing kernels in parallel
-      // cudaStream_t stream1, stream2;
-      // cudaStreamCreate(&stream1);
-      // cudaStreamCreate(&stream2);
+      dim3 gridMPH(leftImg.ySize(), 1, 1);
       
       timer::start("Message Passing Horizontal (GPU)");
-     // Message passing horizontal forward kernel
+      // Message passing horizontal forward kernel
       MPHFKernel<<<gridMPH, blockMPH>>>(unaryCostsCubeD, MqsHFCubeD,
                                         leftImg.xSize(), leftImg.ySize());
       // Message passing horizontal backward kernel
@@ -1226,15 +1253,10 @@ int main(int argc, char** argv)
       // Message Passing Kernerls
       // Define Kernel blocks and Grid of blocks for HORIZONTAL message passing
       dim3 blockMPV(MAX_DISPARITY+1, 1, 1);
-      dim3 gridMPV(1, leftImg.xSize(), 1);
-      
-      // Create streams to run the message passing kernels in parallel
-      // cudaStream_t stream1, stream2;
-      // cudaStreamCreate(&stream1);
-      // cudaStreamCreate(&stream2);
+      dim3 gridMPV(leftImg.xSize(), 1, 1);
       
       timer::start("Message Passing Vertical (GPU)");
-     // Message passing vertical forward kernel
+      // Message passing vertical forward kernel
       MPVFKernel<<<gridMPV, blockMPV>>>(unaryCostsCubeD, MqsVFCubeD,
                                         leftImg.xSize(), leftImg.ySize());
       // Message passing vertical backward kernel
@@ -1249,9 +1271,9 @@ int main(int argc, char** argv)
  
 
     /*************** Decision Computation *******************************/
-    dim3 blockDec(BLOCK_DIM, BLOCK_DIM, 1);
-    dim3 gridDec(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM),
-                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM), 1);
+    dim3 blockDec(BLOCK_DIM_DEC, BLOCK_DIM_DEC, 1);
+    dim3 gridDec(std::ceil((float) leftImg.xSize()/(float) BLOCK_DIM_DEC),
+                        std::ceil((float) leftImg.ySize()/(float) BLOCK_DIM_DEC), 1);
 
     timer::start("Decision (GPU)");
     switch(msgPassingOption) {
@@ -1277,7 +1299,7 @@ int main(int argc, char** argv)
     timer::stop("SGM (GPU)");
     timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
-    // Free allocated memory
+    // Free GPU allocated memory
     cudaFree(leftImgD);
     cudaFree(rightImgD);
     cudaFree(resultD);
@@ -1352,6 +1374,9 @@ int main(int argc, char** argv)
     std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
     return 1;
   }
+
+
+  // Free CPU allocated memory
 
   return 0;
 }
