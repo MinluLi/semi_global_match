@@ -1250,7 +1250,7 @@ __global__ void MPDBTLKernel(float* unaryCostsCubeD, float* MqsDTLCubeD,
       return;
 
     // Each thread will write on position x-1 as it moves along the columns
-    offsetMP -= (MAX_DISPARITY+1) + xdSize;
+    offsetMP += -(MAX_DISPARITY+1) - xdSize;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
     __syncthreads();
 
@@ -1264,7 +1264,7 @@ __global__ void MPDBTLKernel(float* unaryCostsCubeD, float* MqsDTLCubeD,
     __syncthreads();
     MqsDTLCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
-    offsetUC -= (MAX_DISPARITY+1) + xdSize;
+    offsetUC += -(MAX_DISPARITY+1) - xdSize;
     x -= 1;
   }
 }
@@ -1312,7 +1312,7 @@ __global__ void MPDRTLKernel(float* unaryCostsCubeD, float* MqsDTLCubeD,
       return;
 
     // Each thread will write on position y-1 as it moves along the rows
-    offsetMP -= (MAX_DISPARITY+1) + xdSize;
+    offsetMP += -(MAX_DISPARITY+1) - xdSize;
     unaryCostsSharedMem[d] = unaryCostsCubeD[offsetUC];
     __syncthreads();
 
@@ -1326,7 +1326,7 @@ __global__ void MPDRTLKernel(float* unaryCostsCubeD, float* MqsDTLCubeD,
     __syncthreads();
     MqsDTLCubeD[offsetMP] = minCost;
     Mpq[d] = minCost;
-    offsetUC -= (MAX_DISPARITY+1) + xdSize;
+    offsetUC += -(MAX_DISPARITY+1) - xdSize;
     y -= 1;
   }
 }
