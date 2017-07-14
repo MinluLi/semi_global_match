@@ -1911,22 +1911,5 @@ int main(int argc, char** argv)
    *---------------------------------------------------------------------*/
   result.writeToFloatFile(outputFile.c_str());
 
- /*---------------------------------------------------------------------
-  *  Write result to terminal
-  *---------------------------------------------------------------------*/
-  // Generate PGM image from resulting disparity map
-  std::cout << std::endl << "Generate PGM image from file" << std::endl;
-  std::string floatToPGM ("../bin/float3-to-pgm ");
-  floatToPGM.append(outputFile);
-  floatToPGM.append(" ");
-  floatToPGM.append(outputFile);
-  floatToPGM.erase(floatToPGM.length()-6);
-  floatToPGM.append("pgm");
-  std::cout << floatToPGM << std::endl;
-  if (system(floatToPGM.c_str()) == -1) {
-    std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
-    return 1;
-  }
-
   return 0;
 }
