@@ -12,6 +12,25 @@
 #include <string>
 #include <stdlib.h>
 
+
+/************** OPTIONS **************/
+// Unary costs and message passing options
+static const int unaryCostOption = 2; // (1- Euclidean; 2- L1; 3- L2; 4- NCC)
+static const int msgPassingOption = 5; // (1- h; 2- v; 3- h+v; 4- d; 5- h+v+d)
+
+// NxN Patch size
+static const int N_PATCH = 7;
+static const int DEV = N_PATCH/2;
+
+
+// Regularization weight
+static float const LAMBDA = 100.0f;
+
+// Maximum disparity (number of labels in the message passing algorithm)
+static int const MAX_DISPARITY = 50;
+
+
+/************** CODE **************/
 // Block dimension of CUDA kernels
 #define BLOCK_DIM_EUC 32 // Euclidean costs
 #define BLOCK_DIM_L1 16 // L1, L2, NCC costs
@@ -19,11 +38,7 @@
 #define BLOCK_DIM_DEC 32 // Decision
 
 // Max threads per block
-#define MAX_THREADS_BLOCK 512
-
-// NxN Patch size
-static const int N_PATCH = 7;
-static const int DEV = N_PATCH/2;
+#define MAX_THREADS_BLOCK 1024
 
 // Image Textures
 texture<uchar4, cudaTextureType2D, cudaReadModeElementType> texLeft;
@@ -63,15 +78,7 @@ template <typename T>
  *-------------------------------------------------------------------------*/ 
 typedef uchar4 Color;
 
-/*-------------------------------------------------------------------------
- *  Regularization weight
- *-------------------------------------------------------------------------*/
-static float const LAMBDA = 100.0f;
 
-/*-------------------------------------------------------------------------
- *  Maximum disparity (number of labels in the message passing algorithm)
- *-------------------------------------------------------------------------*/ 
-static int const MAX_DISPARITY = 50;
 
 /*======================================================================*/
 /*! 
@@ -1686,7 +1693,8 @@ __global__ void decisionHVDKernel(float* resultD, float* unaryCostsCubeD,
   float minCost = unaryCostsCubeD[offsetUC] +
                   MqsHFCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
                   MqsVFCubeD[offsetUC] + MqsVBCubeD[offsetUC] +
-                  MqsDBRCubeD[offsetUC] + MqsDBLCubeD[offsetUC] +
+                  MqsDBRCubeD[offsetUC] +
+                  MqsDBLCubeD[offsetUC]+
                   MqsDTLCubeD[offsetUC] + MqsDTRCubeD[offsetUC];
   int minIndex = 0;
   float cost = 0.0f;
@@ -1695,13 +1703,15 @@ __global__ void decisionHVDKernel(float* resultD, float* unaryCostsCubeD,
     cost = unaryCostsCubeD[offsetUC] +
            MqsHFCubeD[offsetUC] + MqsHBCubeD[offsetUC] +
            MqsVFCubeD[offsetUC] + MqsVBCubeD[offsetUC] +
-           MqsDBRCubeD[offsetUC] + MqsDBLCubeD[offsetUC] +
+           MqsDBRCubeD[offsetUC] +
+           MqsDBLCubeD[offsetUC]+
            MqsDTLCubeD[offsetUC] + MqsDTRCubeD[offsetUC];
     if(cost < minCost) {
       minCost = cost;
       minIndex = d;
     }
   }
+
 
   int offset = x + y*xSize;
   resultD[offset] = minIndex;
@@ -1736,32 +1746,15 @@ int main(int argc, char** argv)
   msgPassOptionMap.insert(std::make_pair(4, "diagonal"));
   msgPassOptionMap.insert(std::make_pair(5, "horizontal + vertical + diagonal"));
 
-  /*-----------------------------------------------------------------------
-   *  Menu with unary cost and message passing options
-   *-----------------------------------------------------------------------*/
-  int unaryCostOption = 0;
-  while (unaryCostOption < 1 || unaryCostOption > 4) {
-    std::cout << "**************************************************" << std::endl;
-    std::cout << "Unary cost options:" << std::endl;
-    std::cout << "1 - Pixel-wise euclidean" << std::endl;
-    std::cout << "2 - L1 NxN patch" << std::endl;
-    std::cout << "3 - L2 NxN patch" << std::endl;
-    std::cout << "4 - NCC NxN patch" << std::endl;
-    std::cin >> unaryCostOption;
-  }
+  // Output unary costs and message passing option
   std::cout << std::endl;
-  
-  int msgPassingOption = 0;
-  std::cout << std::endl;
-  while (msgPassingOption < 1 || msgPassingOption > 5) {
-    std::cout << "Message Passing Options:" << std::endl;
-    std::cout << "1 - Horizontal" << std::endl;
-    std::cout << "2 - Vertical" << std::endl;
-    std::cout << "3 - Horizontal + Vertical" << std::endl;
-    std::cout << "4 - Diagonal" << std::endl;
-    std::cout << "5 - Horizontal + Vertical + Diagonal" << std::endl;
-    std::cin >> msgPassingOption;
+  if (unaryCostOption == 1) {
+    std::cout << "Unary cost : " << unaryCostsMap[unaryCostOption] << std::endl;
+  } else {
+    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
+    std::cout << " " << N_PATCH << "x" << N_PATCH << " patches" << std::endl;
   }
+  std::cout << "Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
 
   /*-----------------------------------------------------------------------
    *  Read rectified left and right input image and put them into
@@ -1917,7 +1910,6 @@ int main(int argc, char** argv)
       // Message passing vertical backward kernel
       MPVBKernel<<<gridMPV, blockMPV>>>(unaryCostsCubeD, MqsVBCubeD,
                                         leftImg.xSize(), leftImg.ySize());
-
       timer::stop("Message Passing Vertical (GPU)");
     }
 
@@ -1955,7 +1947,7 @@ int main(int argc, char** argv)
                                         leftImg.xSize(), leftImg.ySize());
 
       // Message passing diagonal left-to-right bottom kernel
-      MPDTBRKernel<<<gridMPDLR, blockMPDLR>>>(unaryCostsCubeD, MqsDBRCubeD,
+      MPDLBRKernel<<<gridMPDLR, blockMPDLR>>>(unaryCostsCubeD, MqsDBRCubeD,
                                         leftImg.xSize(), leftImg.ySize());
 
       // To BOTTOM LEFT
@@ -1986,7 +1978,6 @@ int main(int argc, char** argv)
                                         leftImg.xSize(), leftImg.ySize());
       timer::stop("Message Passing Diagonal (GPU)");
     }
-
     cudaDeviceSynchronize(); 
     CHECK_CUDA_ERROR("A message passing task has failed");
  
@@ -2037,6 +2028,7 @@ int main(int argc, char** argv)
     timer::stop("SGM (GPU)");
     timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
+    
     // Free GPU allocated memory
     cudaFree(leftImgD);
     cudaFree(rightImgD);
@@ -2055,62 +2047,20 @@ int main(int argc, char** argv)
     return 1;
   }
 
-
   /*---------------------------------------------------------------------
    *  Write results to output file 
-   *  Format: [imgNumber]-[unaryCostOption]-[msgPassingOption]-gt.float3
    *---------------------------------------------------------------------*/
-  std::string resultFile ("-gt.float3");
-  std::string imgFileNum("");
-  imgFileNum.append(outputFile.substr(0, outputFile.size()-10));
-  resultFile.insert(0, NumberToString(msgPassingOption)); 
-  resultFile.insert(0, NumberToString(unaryCostOption));
-  resultFile.insert(0, "-");
-  resultFile.insert(0, imgFileNum);
-  // Write result to file
-  result.writeToFloatFile(resultFile.c_str());
+  result.writeToFloatFile(outputFile.c_str());
 
  /*---------------------------------------------------------------------
   *  Write result to terminal
   *---------------------------------------------------------------------*/
-  std::cout << std::endl;
-  if (unaryCostOption == 1) {
-    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
-  } else {
-    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
-    std::cout << " " << N_PATCH << "x" << N_PATCH << " patches";
-  }
-
-  // Compute EPE against ground truth
-  // Overall EPE
-  std::string dispEPE ("../bin/disp-epe ");
-  dispEPE.append(resultFile);
-  dispEPE.append(" ");
-  dispEPE.append(outputFile);
-  std::cout << ", Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
-  std::cout << dispEPE << std::endl;
-  if (system(dispEPE.c_str()) == -1) {
-    std::cerr << "Couldn't run disp-epe command" << std::endl;
-    return 1;
-  }
-
-  // Non-occluded EPE
-  std::string dispEPEocc(dispEPE);
-  dispEPEocc.append(" ");
-  dispEPEocc.append(imgFileNum);
-  dispEPEocc.append("-occ.pgm");
-  std::cout << dispEPEocc << std::endl;
-  if (system(dispEPEocc.c_str()) == -1) {
-    std::cerr << "Couldn't run disp-epe command" << std::endl;
-    return 1;
-  }
-
   // Generate PGM image from resulting disparity map
   std::cout << std::endl << "Generate PGM image from file" << std::endl;
   std::string floatToPGM ("../bin/float3-to-pgm ");
-  floatToPGM.append(resultFile);
+  floatToPGM.append(outputFile);
   floatToPGM.append(" ");
-  floatToPGM.append(resultFile);
+  floatToPGM.append(outputFile);
   floatToPGM.erase(floatToPGM.length()-6);
   floatToPGM.append("pgm");
   std::cout << floatToPGM << std::endl;
@@ -2118,9 +2068,6 @@ int main(int argc, char** argv)
     std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
     return 1;
   }
-
-
-  // Free CPU allocated memory
 
   return 0;
 }
