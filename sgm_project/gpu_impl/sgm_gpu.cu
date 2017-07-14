@@ -15,8 +15,8 @@
 
 /************** OPTIONS **************/
 // Unary costs and message passing options
-static const int unaryCostOption = 2; // (1- Euclidean; 2- L1; 3- L2; 4- NCC)
-static const int msgPassingOption = 5; // (1- h; 2- v; 3- h+v; 4- d; 5- h+v+d)
+static const int unaryCostOption = 3; // (1- Euclidean; 2- L1; 3- L2; 4- NCC)
+static const int msgPassingOption = 3; // (1- h; 2- v; 3- h+v; 4- d; 5- h+v+d)
 
 // NxN Patch size
 static const int N_PATCH = 7;
@@ -63,22 +63,9 @@ inline void _CHECK_CUDA_ERROR(
 }
 
 /*-------------------------------------------------------------------------
- *  Convert integer to std::string 
- *-------------------------------------------------------------------------*/
-template <typename T>
-  std::string NumberToString ( T Number )
-  {
-    std::ostringstream ss;
-    ss << Number;
-    return ss.str();
-  }
-
-/*-------------------------------------------------------------------------
  *  32Bit RGBA color
  *-------------------------------------------------------------------------*/ 
 typedef uchar4 Color;
-
-
 
 /*======================================================================*/
 /*! 
@@ -101,6 +88,22 @@ void CTensorToColorCMatrix(
   }
 }
 
+/*======================================================================*/
+/*! 
+ *   Compute absolute distance of given pixels.
+ *
+ *   \param a The first pixel
+ *   \param b The second pixel
+ *
+ *   \return L1-distance of a and b
+ */
+/*======================================================================*/
+__device__ inline float unaryL1(Color const &a, Color const &b)
+{
+  return abs(static_cast<float>(a.x) - static_cast<float>(b.x)) +
+         abs(static_cast<float>(a.y) - static_cast<float>(b.y)) +
+         abs(static_cast<float>(a.z) - static_cast<float>(b.z));
+}
 
 /*======================================================================*/
 /*! 
@@ -232,17 +235,18 @@ __global__ void unaryCostEuclideanKernel(float* unaryCostsCubeD,
 
 /*======================================================================*/
 /*! 
- *   Compute unary costs with L1-norm for pixel neighborhood
+ *   Compute unary costs with Lx-norm for pixel neighborhood
  *
  *   \param unaryCostsCubeD Cube with unary costs
  *   \param xSize xSize of original left image
  *   \param ySize ySize of original left image 
+ *   \param option 1: L1-norm; 2: L2-norm 
  *
  *   \return None
  */
 /*======================================================================*/
-__global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
-    int xSize, int ySize)
+__global__ void unaryCostLxNormKernel(float* unaryCostsCubeD,
+    int xSize, int ySize, int option)
 {
   int x = blockDim.x * blockIdx.x + threadIdx.x;
   int y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -381,169 +385,11 @@ __global__ void unaryCostL1NormKernel(float* unaryCostsCubeD,
       for (int k = -DEV; k < DEV; ++k) {
         colorL = sharedMemLeft[row+j][col+k];
         colorR = sharedMemRight[row+j][col+k];
-        theta += abs(static_cast<float>(colorL.x) - static_cast<float>(colorR.x)) +
-                 abs(static_cast<float>(colorL.y) - static_cast<float>(colorR.y)) +
-                 abs(static_cast<float>(colorL.z) - static_cast<float>(colorR.z));
-      }
-    }
-    unaryCostsCubeD[offset] = theta;
-  }
-}
-
-
-/*======================================================================*/
-/*! 
- *   Compute unary costs with L2-norm for pixel neighborhood
- *
- *   \param unaryCostsCubeD Cube with unary costs
- *   \param xSize xSize of original left image
- *   \param ySize ySize of original left image 
- *
- *   \return None
- */
-/*======================================================================*/
-__global__ void unaryCostL2NormKernel(float* unaryCostsCubeD,
-    int xSize, int ySize)
-{
-  int x = blockDim.x * blockIdx.x + threadIdx.x;
-  int y = blockDim.y * blockIdx.y + threadIdx.y;
-  int d = blockDim.z * blockIdx.z + threadIdx.z;
-  if( x >= xSize || y >= ySize || d >= MAX_DISPARITY+1)
-    return;
-
-  // Position of the thread in the unary costs cube array
-  int offset = d + x*(MAX_DISPARITY+1) + y*(MAX_DISPARITY+1)*xSize;
-
-  if (x -d < 0) {
-    unaryCostsCubeD[offset] = 1.0e9f;
-  } else {
-    // Position of the pixel in the Left and Right texture
-    float uL = (float) x/ (float) xSize;
-    float vL = (float) y/ (float) ySize;
-    float uR = uL - (float) d / (float) xSize;
-    float vR = vL;
-
-    // Read Left image block to shared memory
-    __shared__ Color sharedMemLeft[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
-    int row = threadIdx.y;
-    int col = threadIdx.x;
-
-    sharedMemLeft[row+DEV][col+DEV] = tex2D(texLeft, uL, vL); // all threads
-    if (row == 0) { // upper side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemLeft[row+i][col+DEV] = tex2D(texLeft, uL, vL-(float)(DEV-i)/(float)ySize);
-      }
-      if (col == 0) { // corner 0,0
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemLeft[row+i][col+j] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize,
-                                                         vL-(float)(DEV-j)/(float)ySize);
-          }
+        if (option == 1) {
+          theta += unaryL1(colorL, colorR);
+        } else if (option == 2) {
+          theta += unaryL2Squared(colorL, colorR);
         }
-      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemLeft[row+i][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                         vL-(float)(DEV-j)/(float)ySize);
-          }
-        }
-      }
-    } else if (row == BLOCK_DIM_L1-1) { // bottom side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemLeft[row+DEV+i+1][col+DEV+1] = tex2D(texLeft, uL, vL+(float)(i+1)/(float)ySize);
-      }
-      if (col == 0) { // corner 1,0
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemLeft[row+DEV+i+1][col+j] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                               vL-(float)(DEV-j)/(float)ySize);
-          }
-        }
-      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemLeft[row+DEV+i+1][col+DEV+j+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize,
-                                                                     vL+(float)(j+1)/(float)ySize);
-          }
-        }
-      }
-    }
-    if (col == 0) { // left side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemLeft[row+DEV][col+i] = tex2D(texLeft, uL-(float)(DEV-i)/(float)xSize, vL);
-      }
-    } else if (col == BLOCK_DIM_L1-1) { // right side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemLeft[row+DEV][col+i+1] = tex2D(texLeft, uL+(float)(i+1)/(float)xSize, vL);
-      }
-    }
-
-    // Read Right image block to shared memory
-    __shared__ Color sharedMemRight[BLOCK_DIM_L1+N_PATCH-1][BLOCK_DIM_L1+N_PATCH-1];
-
-    sharedMemRight[row+DEV][col+DEV] = tex2D(texRight, uR, vR); // all threads
-    if (row == 0) { // upper side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemRight[row+i][col+DEV] = tex2D(texRight, uR, vR-(float)(DEV-i)/(float)ySize);
-      }
-      if (col == 0) { // corner 0,0
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemRight[row+i][col+j] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize,
-                                                         vR-(float)(DEV-j)/(float)ySize);
-          }
-        }
-      } else if (col == BLOCK_DIM_L1-1) { // corner 0,1
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemRight[row+i][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                         vR-(float)(DEV-j)/(float)ySize);
-          }
-        }
-      }
-    } else if (row == BLOCK_DIM_L1-1) { // bottom side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemRight[row+DEV+i+1][col+DEV+1] = tex2D(texRight, uR, vR+(float)(i+1)/(float)ySize);
-      }
-      if (col == 0) { // corner 1,0
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemRight[row+DEV+i+1][col+j] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                               vR-(float)(DEV-j)/(float)ySize);
-          }
-        }
-      } else if (col == BLOCK_DIM_L1-1) { // corner 1,1
-        for (int i = 0; i < DEV; ++i) {
-          for (int j = 0; j < DEV; ++j) {
-            sharedMemRight[row+DEV+i+1][col+DEV+j+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize,
-                                                                     vR+(float)(j+1)/(float)ySize);
-          }
-        }
-      }
-    }
-    if (col == 0) { // left side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemRight[row+DEV][col+i] = tex2D(texRight, uR-(float)(DEV-i)/(float)xSize, vR);
-      }
-    } else if (col == BLOCK_DIM_L1-1) { // right side
-      for (int i = 0; i < DEV; ++i) {
-        sharedMemRight[row+DEV][col+i+1] = tex2D(texRight, uR+(float)(i+1)/(float)xSize, vR);
-      }
-    }
-
-    __syncthreads();
-
-    // Compute unary cost by reading the block shared memory
-    float theta = 0.0f;
-    Color colorL, colorR;
-    row += DEV;
-    col += DEV;
-
-    for (int j = -DEV; j < DEV; ++j) {
-      for (int k = -DEV; k < DEV; ++k) {
-        colorL = sharedMemLeft[row+j][col+k];
-        colorR = sharedMemRight[row+j][col+k];
-        theta += unaryL2Squared(colorL, colorR);
       }
     }
     unaryCostsCubeD[offset] = theta;
@@ -1732,6 +1578,7 @@ int main(int argc, char** argv)
     exit(1);
   }
   std::string outputFile(argv[3]);
+
   // unaryCosts map
   std::map<int, std::string> unaryCostsMap;
   unaryCostsMap.insert(std::make_pair(1, "PixelWise Euclidean"));
@@ -1802,10 +1649,12 @@ int main(int argc, char** argv)
     CHECK_CUDA_ERROR("Could not allocate device memory for result");
 
     // Bind the memory to the Left and Right images Textures
-    cudaBindTexture2D( 0, texLeft, leftImgD, leftImg.xSize(), leftImg.ySize(), sizeof(Color)*leftImg.xSize());
+    cudaBindTexture2D( 0, texLeft, leftImgD, leftImg.xSize(), leftImg.ySize(),
+                       sizeof(Color)*leftImg.xSize());
     CHECK_CUDA_ERROR("Could not bind the left image to the texture");
 
-    cudaBindTexture2D( 0, texRight, rightImgD, rightImg.xSize(), rightImg.ySize(), sizeof(Color)*rightImg.xSize());
+    cudaBindTexture2D( 0, texRight, rightImgD, rightImg.xSize(), rightImg.ySize(),
+                       sizeof(Color)*rightImg.xSize());
     CHECK_CUDA_ERROR("Could not bind the right image to the texture");
     
     // Setup texture parameters 
@@ -1821,7 +1670,8 @@ int main(int argc, char** argv)
 
     // Allocate memory for a unary costs Cube array in the device
     float* unaryCostsCubeD; // (d, x, y)
-    cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+    cudaMalloc((void**)&unaryCostsCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+               leftImg.xSize()*leftImg.ySize());
     CHECK_CUDA_ERROR("Could not allocate device memory for unary costs cube");
 
     /***************************
@@ -1839,14 +1689,14 @@ int main(int argc, char** argv)
     timer::start("SGM (GPU)");
     timer::start("Unary Costs (GPU)");
     switch(unaryCostOption) {
-      case 1: unaryCostEuclideanKernel<<<gridUC_EUC, blockUC_EUC>>>(unaryCostsCubeD, leftImgD, rightImgD,
-                                                    leftImg.xSize(), leftImg.ySize());
+      case 1: unaryCostEuclideanKernel<<<gridUC_EUC, blockUC_EUC>>>(unaryCostsCubeD,
+                                    leftImgD, rightImgD, leftImg.xSize(), leftImg.ySize());
               break;
-      case 2: unaryCostL1NormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
-                                                 leftImg.xSize(), leftImg.ySize());
+      case 2: unaryCostLxNormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
+                                    leftImg.xSize(), leftImg.ySize(), 1);
               break;
-      case 3: unaryCostL2NormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
-                                                 leftImg.xSize(), leftImg.ySize());
+      case 3: unaryCostLxNormKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
+                                    leftImg.xSize(), leftImg.ySize(), 2);
               break;
       case 4: unaryCostNCCKernel<<<gridUC_L1, blockUC_L1>>>(unaryCostsCubeD,
                                               leftImg.xSize(), leftImg.ySize());
@@ -1864,10 +1714,12 @@ int main(int argc, char** argv)
     /*************** Message Passing Computation *******************************/
     if (msgPassingOption == 1 || msgPassingOption == 3 || msgPassingOption == 5) {
       // Allocate memory for a message passing Cube array in the device (d, x, y)
-      cudaMalloc((void**)&MqsHFCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsHFCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for horizontal forward cube");
 
-      cudaMalloc((void**)&MqsHBCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsHBCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for horizontal backward cube");
 
       // Message Passing Kernerls 
@@ -1891,10 +1743,12 @@ int main(int argc, char** argv)
     float* MqsVBCubeD; // Vertical Backward
     if (msgPassingOption == 2 || msgPassingOption == 3 || msgPassingOption == 5) {
       // Allocate memory for a message passing Cube array in the device (d, x, y)
-      cudaMalloc((void**)&MqsVFCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsVFCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for vertical forward cube");
 
-      cudaMalloc((void**)&MqsVBCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsVBCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for vertical backward cube");
 
       // Message Passing Kernerls
@@ -1920,16 +1774,20 @@ int main(int argc, char** argv)
     float* MqsDTRCubeD; // Diagonal to Top Right 
     if (msgPassingOption == 4 || msgPassingOption == 5) {
       // Allocate memory for a message passing Cube array in the device (d, x, y)
-      cudaMalloc((void**)&MqsDBRCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsDBRCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for diagonal to bottom right cube");
 
-      cudaMalloc((void**)&MqsDBLCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsDBLCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for diagonal to bottom left cube");
 
-      cudaMalloc((void**)&MqsDTLCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsDTLCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for diagonal to top left cube");
 
-      cudaMalloc((void**)&MqsDTRCubeD, sizeof(float)*(MAX_DISPARITY+1)*leftImg.xSize()*leftImg.ySize());
+      cudaMalloc((void**)&MqsDTRCubeD, sizeof(float)*(MAX_DISPARITY+1)*
+                 leftImg.xSize()*leftImg.ySize());
       CHECK_CUDA_ERROR("Could not allocate device memory for diagonal to top right cube");
 
       // Message Passing Kernerls
@@ -2022,7 +1880,8 @@ int main(int argc, char** argv)
 
     // Copy resulting disparity map from device to host
     cudaMemcpy2D((void*)result.data(), sizeof(float)*leftImg.xSize(),
-                 (void*)resultD, sizeof(float)*leftImg.xSize(), sizeof(float)*leftImg.xSize(), leftImg.ySize(),
+                 (void*)resultD, sizeof(float)*leftImg.xSize(),
+                 sizeof(float)*leftImg.xSize(), leftImg.ySize(),
                  cudaMemcpyDeviceToHost);
     CHECK_CUDA_ERROR("Could not copy the result from device to host");
     timer::stop("SGM (GPU)");

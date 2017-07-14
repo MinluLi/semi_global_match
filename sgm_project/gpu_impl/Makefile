@@ -1,13 +1,11 @@
-export prefix = $$(PWD)
+CC=gcc
+CXX=g++
+NVCC=nvcc
+AR=ar
 
-export CC = gcc
-export CXX = g++
-export NVCC = nvcc
-export AR = ar
-
-export CFLAGS = -Wall -Wextra -pedantic -O2 -fopenmp
-export CXXFLAGS = -Wall -Wextra -pedantic -O2 -fopenmp
-export NVCCFLAGS = -g -O2 -Xcompiler "-fopenmp" \
+CFLAGS=-Wall -Wextra -pedantic -O2 
+CXXFLAGS=-Wall -Wextra -pedantic -O2 
+NVCCFLAGS=-O2 -Xcompiler '-fopenmp'\
 	-gencode=arch=compute_30,code=compute_30 \
 	-gencode=arch=compute_30,code=sm_30 \
 	-gencode=arch=compute_35,code=compute_35 \
@@ -17,10 +15,6 @@ export NVCCFLAGS = -g -O2 -Xcompiler "-fopenmp" \
 	-gencode=arch=compute_61,code=compute_61 \
   -gencode=arch=compute_61,code=sm_61
 #--ptxas-options=-v
-
-export ARFLAGS = -cru
-
-export top_srcdir = $$(PWD)
 
 .PHONY: all
 all: sgm_gpu

@@ -7,7 +7,7 @@ avg_epe_occ="0"
 
 for (( i=1; i <= 7; i++ )); do
     echo -n "Computing disparity between ${i}-imgL.ppm and ${i}-imgR.ppm... "
-    ./sgm_cpu ../data/sintel/${i}-imgL.ppm ../data/sintel/${i}-imgR.ppm ../results/sintel/${i}-disparity.float3 >/dev/null 2>&1
+    ./sgm_gpu ../data/sintel/${i}-imgL.ppm ../data/sintel/${i}-imgR.ppm ../results/sintel/${i}-disparity.float3 >/dev/null 2>&1
 
     epe[$i]="$(./disp-epe ../results/sintel/${i}-disparity.float3 ../data/sintel/${i}-gt.float3)"
     echo -n "epe = ${epe[$i]} "
