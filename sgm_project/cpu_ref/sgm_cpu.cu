@@ -9,29 +9,26 @@
 #include <string>
 #include <stdlib.h>
 
-// Convert integer to std::string
-template <typename T>
-  std::string NumberToString ( T Number )
-  {
-    std::ostringstream ss;
-    ss << Number;
-    return ss.str();
-  }
+/************** OPTIONS **************/
+// Unary costs and message passing options
+static const int unaryCostOption = 3; // (1- Euclidean; 2- L1; 3- L2; 4- NCC)
+static const int msgPassingOption = 3; // (1- h; 2- h+v; 3- h+v+d)
 
+// NxN Patch size
+static const int N_PATCH = 7;
+
+// Regularization weight
+static float const LAMBDA = 100.0f;
+
+// Maximum disparity (number of labels in the message passing algorithm)
+static int const MAX_DISPARITY = 50;
+
+
+/************** CODE **************/
 /*-------------------------------------------------------------------------
  *  32Bit RGBA color
  *-------------------------------------------------------------------------*/ 
 typedef uchar4 Color;
-
-/*-------------------------------------------------------------------------
- *  Regularization weight
- *-------------------------------------------------------------------------*/
-static float const LAMBDA = 50.0f;
-
-/*-------------------------------------------------------------------------
- *  Maximum disparity (number of labels in the message passing algorithm)
- *-------------------------------------------------------------------------*/ 
-static int const MAX_DISPARITY = 50;
 
 /*======================================================================*/
 /*! 
@@ -121,7 +118,6 @@ inline float unaryEuclidean(Color const &a, Color const &b)
  *   \param xr        x position of right image pixel
  *   \param yr        y position of right image pixel
  *   \param costFunction {1: L1-norm; 2: L2-norm squared} 
- *   \param N         NxN neighborhood
  *
  *   \return Lx-norm for pixel neighborhood
  */
@@ -129,11 +125,10 @@ inline float unaryEuclidean(Color const &a, Color const &b)
 inline float unaryLxNeighbor(CMatrix<Color> const &leftImg,
                              CMatrix<Color> const &rightImg,
                              int xl, int yl, int xr, int yr,
-                             int costFunction,
-                             int N)
+                             int costFunction)
 {
   float theta = 0.0f;
-  int lim = static_cast<int>(N/2);
+  int lim = static_cast<int>(N_PATCH/2);
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
       if (xl+i >= 0 && xl+i < leftImg.xSize() &&
@@ -165,20 +160,19 @@ inline float unaryLxNeighbor(CMatrix<Color> const &leftImg,
  *   \param Img       Image
  *   \param x         x position of image pixel
  *   \param y         y position of image pixel
- *   \param N         NxN neighborhood
  *
  *   \return average pixel Color for the neighborhood
  */
 /*======================================================================*/
 inline Color averagePixel(CMatrix<Color> const &Img,
-                          int x, int y, int N)
+                          int x, int y)
 {
   Color averagePixel;
   float averagePixelX = 0.0f;
   float averagePixelY = 0.0f;
   float averagePixelZ = 0.0f;
 
-  int lim = N/2;
+  int lim = N_PATCH/2;
   int numNeighbors = 0;
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
@@ -247,24 +241,23 @@ inline float pixelDotProd(float4 const &a, float4 const &b)
  *   \param yl        y position of left image pixel
  *   \param xr        x position of right image pixel
  *   \param yr        y position of right image pixel
- *   \param N         NxN neighborhood
  *
  *   \return NCC for pixel neighborhood 
  */
 /*======================================================================*/
 inline float unaryNCCNeighbor(CMatrix<Color> const &leftImg,
                               CMatrix<Color> const &rightImg,
-                              int xl, int yl, int xr, int yr, int N)
+                              int xl, int yl, int xr, int yr)
 {
   float theta = 0.0f;
-  int lim = static_cast<int>(N/2);
+  int lim = static_cast<int>(N_PATCH/2);
   float varLeftImg = 0.0f;
   float varRightImg = 0.0f;
   
   Color averagePixelLeftImg;
   Color averagePixelRightImg;
-  averagePixelLeftImg = averagePixel(leftImg, xl, yl, N);
-  averagePixelRightImg = averagePixel(rightImg, xr, yr, N);
+  averagePixelLeftImg = averagePixel(leftImg, xl, yl);
+  averagePixelRightImg = averagePixel(rightImg, xr, yr);
 
   for (int j = -lim; j < lim; ++j) {
     for (int i = -lim; i < lim; ++i) {
@@ -315,7 +308,6 @@ inline float thetapq(int a, int b)
  *   \param leftImg Left Image
  *   \param rightImg Right Image
  *   \param unaryCostOption {pixelWise, L1, L2, NCC}
- *   \param N NxN patch size for L1, L2, NCC unary costs
  *   \param msgPassingOption
  *
  *   \return void, just writes the result in the result matrix
@@ -323,7 +315,7 @@ inline float thetapq(int a, int b)
 /*======================================================================*/
 void sgmCPU(CMatrix<float> &result,
             CMatrix<Color> const &leftImg, CMatrix<Color> const &rightImg,
-            int unaryCostOption, int N, int msgPassingOption)
+            int unaryCostOption, int msgPassingOption)
 {
   std::cout << std::endl;
   /*-----------------------------------------------------------------------
@@ -347,18 +339,15 @@ void sgmCPU(CMatrix<float> &result,
               break;
             case 2:  // NxN L1 distance
               unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg,
-                                                     x, y, x - i, y,
-                                                     1, N);
+                                                     x, y, x - i, y, 1);
               break;
             case 3:  // NxN L2 distance
               unarycosts(x, y, i) = unaryLxNeighbor(leftImg, rightImg,
-                                                     x, y, x - i, y,
-                                                     2, N);
+                                                     x, y, x - i, y, 2);
               break;
             case 4:  // NxN NCC
               unarycosts(x, y, i) = -abs(unaryNCCNeighbor(leftImg, rightImg,
-                                                          x, y, x - i, y,
-                                                          N));
+                                                          x, y, x - i, y));
               break;
           }
         }
@@ -728,35 +717,15 @@ int main(int argc, char** argv)
   msgPassOptionMap.insert(std::make_pair(2, "horizontal + vertical"));
   msgPassOptionMap.insert(std::make_pair(3, "horizontal + vertical + diagonal"));
 
-  /*-----------------------------------------------------------------------
-   *  Menu with unary cost and message passing options
-   *-----------------------------------------------------------------------*/
-  int unaryCostOption = 0;
-  int N;
-  while (unaryCostOption < 1 || unaryCostOption > 4) {
-    std::cout << "**************************************************" << std::endl;
-    std::cout << "Unary cost options:" << std::endl;
-    std::cout << "1 - Pixel-wise euclidean" << std::endl;
-    std::cout << "2 - L1 NxN patch" << std::endl;
-    std::cout << "3 - L2 NxN patch" << std::endl;
-    std::cout << "4 - NCC NxN patch" << std::endl;
-    std::cin >> unaryCostOption;
-  }
+  // Output unary costs and message passing option
   std::cout << std::endl;
-  if (unaryCostOption != 1) {
-    std::cout << "Select NxN patch: ";
-    std::cin >> N;
+  if (unaryCostOption == 1) {
+    std::cout << "Unary cost : " << unaryCostsMap[unaryCostOption] << std::endl;
+  } else {
+    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
+    std::cout << " " << N_PATCH << "x" << N_PATCH << " patches" << std::endl;
   }
-  
-  int msgPassingOption = 0;
-  std::cout << std::endl;
-  while (msgPassingOption < 1 || msgPassingOption > 3) {
-    std::cout << "Message Passing Options:" << std::endl;
-    std::cout << "1 - Horizontal" << std::endl;
-    std::cout << "2 - Horizontal + Vertical" << std::endl;
-    std::cout << "3 - Horizontal + Vertical + Diagonal" << std::endl;
-    std::cin >> msgPassingOption;
-  }
+  std::cout << "Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
 
   /*-----------------------------------------------------------------------
    *  Read rectified left and right input image and put them into
@@ -777,72 +746,14 @@ int main(int argc, char** argv)
   
   // Compute Semi-global matching
   timer::start("SGM (CPU)");
-  sgmCPU(result, leftImg, rightImg, unaryCostOption, N, msgPassingOption);
+  sgmCPU(result, leftImg, rightImg, unaryCostOption, msgPassingOption);
   timer::stop("SGM (CPU)");
   timer::printToScreen(std::string(), timer::AUTO_COMMON, timer::ELAPSED_TIME);
 
   /*---------------------------------------------------------------------
    *  Write results to output file 
-   *  Format: [imgNumber]-[unaryCostOption]-[msgPassingOption]-gt.float3
    *---------------------------------------------------------------------*/
-  std::string resultFile ("-gt.float3");
-  std::string imgFileNum("");
-  imgFileNum.append(outputFile.substr(0, outputFile.size()-10));
-  resultFile.insert(0, NumberToString(msgPassingOption)); 
-  resultFile.insert(0, NumberToString(unaryCostOption));
-  resultFile.insert(0, "-");
-  resultFile.insert(0, imgFileNum);
-  // Write result to file
-  result.writeToFloatFile(resultFile.c_str());
-
- /*---------------------------------------------------------------------
-  *  Write result to terminal
-  *---------------------------------------------------------------------*/
-  std::cout << std::endl;
-  if (unaryCostOption == 1) {
-    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
-  } else {
-    std::cout << "Unary cost: " << unaryCostsMap[unaryCostOption];
-    std::cout << " " << N << "x" << N << " patches";
-  }
-
-  // Compute EPE against ground truth
-  // Overall EPE
-  std::string dispEPE ("../bin/disp-epe ");
-  dispEPE.append(resultFile);
-  dispEPE.append(" ");
-  dispEPE.append(outputFile);
-  std::cout << ", Msg Passing: " << msgPassOptionMap[msgPassingOption] << std::endl;
-  std::cout << dispEPE << std::endl;
-  if (system(dispEPE.c_str()) == -1) {
-    std::cerr << "Couldn't run disp-epe command" << std::endl;
-    return 1;
-  }
-
-  // Non-occluded EPE
-  std::string dispEPEocc(dispEPE);
-  dispEPEocc.append(" ");
-  dispEPEocc.append(imgFileNum);
-  dispEPEocc.append("-occ.pgm");
-  std::cout << dispEPEocc << std::endl;
-  if (system(dispEPEocc.c_str()) == -1) {
-    std::cerr << "Couldn't run disp-epe command" << std::endl;
-    return 1;
-  }
-
-  // Generate PGM image from resulting disparity map
-  std::cout << std::endl << "Generate PGM image from file" << std::endl;
-  std::string floatToPGM ("../bin/float3-to-pgm ");
-  floatToPGM.append(resultFile);
-  floatToPGM.append(" ");
-  floatToPGM.append(resultFile);
-  floatToPGM.erase(floatToPGM.length()-6);
-  floatToPGM.append("pgm");
-  std::cout << floatToPGM << std::endl;
-  if (system(floatToPGM.c_str()) == -1) {
-    std::cerr << "Couldn't run float3-to-pgm command" << std::endl;
-    return 1;
-  }
+  result.writeToFloatFile(outputFile.c_str());
 
   return 0;
 }
