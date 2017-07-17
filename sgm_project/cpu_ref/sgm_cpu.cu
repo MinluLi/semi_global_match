@@ -15,7 +15,7 @@ static const int unaryCostOption = 3; // (1- Euclidean; 2- L1; 3- L2; 4- NCC)
 static const int msgPassingOption = 3; // (1- h; 2- h+v; 3- h+v+d)
 
 // NxN Patch size
-static const int N_PATCH = 7;
+static const int N_PATCH = 11;
 
 // Regularization weight
 static float const LAMBDA = 100.0f;
