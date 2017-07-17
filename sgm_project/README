@@ -55,3 +55,4 @@ For visualization, you can also convert the .float3 files to .pgm
 as follows: 
 
 float3-to-pgm your-disp.float3 your-disp.pgm 
+
